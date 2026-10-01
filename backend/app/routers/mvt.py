@@ -14,6 +14,7 @@ from sqlalchemy import select, text
 from app.database import get_db
 from app.models import VectorLayer, User, UserRole
 from app.auth import get_optional_current_user, get_redis
+from app.routers.geo_access import require_geo_entry
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,7 @@ async def get_vector_tile(
     request: Request,
     db: AsyncSession = Depends(get_db),
     user: Optional[User] = Depends(get_optional_current_user),
+    _geo_entry: bool = Depends(require_geo_entry),
 ):
     """
     Serve dynamic Mapbox Vector Tile (.pbf) for any vector layer directly from PostGIS.
@@ -216,6 +218,7 @@ async def get_tilejson(
     request: Request,
     db: AsyncSession = Depends(get_db),
     user: Optional[User] = Depends(get_optional_current_user),
+    _geo_entry: bool = Depends(require_geo_entry),
 ):
     """Return TileJSON 2.2.0 metadata for vector tile client integration."""
     res = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id))

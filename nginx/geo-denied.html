@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="ne">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>पहुँच अस्वीकृत | Access Denied — KMC GeoPortal</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Noto Sans Devanagari', 'Inter', system-ui, sans-serif;
+    background: linear-gradient(135deg, #02204e 0%, #0447af 60%, #02204e 100%);
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    padding: 24px; color: #0f172a;
+  }
+  .ribbon { position: fixed; top: 0; left: 0; right: 0; height: 5px;
+    background: linear-gradient(90deg, #c8102e 0%, #c8102e 30%, #0447af 30%, #0447af 100%); }
+  .card {
+    background: #fff; border-radius: 20px; max-width: 560px; width: 100%;
+    padding: 40px 36px; text-align: center;
+    box-shadow: 0 25px 60px rgba(0,0,0,.35);
+  }
+  .shield {
+    width: 72px; height: 72px; border-radius: 50%; background: #dc2626;
+    display: flex; align-items: center; justify-content: center; margin: 0 auto 20px;
+  }
+  .shield svg { width: 36px; height: 36px; stroke: #fff; }
+  h1 { font-size: 26px; color: #b91c1c; margin-bottom: 6px; }
+  .sub { font-size: 13px; color: #64748b; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 18px; }
+  p.ne { font-size: 16px; color: #1e293b; line-height: 1.7; margin-bottom: 8px; }
+  p.en { font-size: 14px; color: #475569; line-height: 1.6; margin-bottom: 22px; }
+  .tips { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px;
+    padding: 14px 16px; text-align: left; font-size: 13px; color: #475569;
+    line-height: 1.8; margin-bottom: 24px; }
+  .tips b { color: #0f172a; }
+  a.btn {
+    display: inline-block; background: #0447af; color: #fff; text-decoration: none;
+    font-weight: 700; font-size: 15px; padding: 13px 34px; border-radius: 12px;
+    transition: background .15s;
+  }
+  a.btn:hover { background: #03357f; }
+  .foot { margin-top: 22px; font-size: 11px; color: #94a3b8; }
+</style>
+</head>
+<body>
+<div class="ribbon"></div>
+<div class="card">
+  <div class="shield">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+    </svg>
+  </div>
+  <h1>पहुँच अस्वीकृत</h1>
+  <div class="sub">Access denied &mdash; HTTP 403</div>
+  <p class="ne">काठमाडौँ महानगरपालिकाको <b>जियो वर्ल्ड</b> नेपालभित्रका दर्शकहरूका लागि मात्र उपलब्ध छ। VPN, प्रोक्सी वा डाटासेन्टर जडानबाट पहुँच अनुमति छैन।</p>
+  <p class="en">The <b>Geo World of KMC</b> is available to viewers inside Nepal only. Access via VPN, proxy or datacenter connections is not permitted.</p>
+  <div class="tips">
+    <b>पुनः प्रयास गर्नु अघि:</b><br>
+    &bull; VPN / प्रोक्सी पूर्ण रूपमा बन्द गर्नुहोस्<br>
+    &bull; नेपालभित्रको इन्टरनेट जडान प्रयोग गर्नुहोस्<br><br>
+    <b>Before retrying:</b><br>
+    &bull; Fully disconnect any VPN / proxy<br>
+    &bull; Use an internet connection inside Nepal
+  </div>
+  <a class="btn" href="/geoportal">पोर्टलमा फर्कनुहोस् &nbsp;·&nbsp; Back to Portal</a>
+  <div class="foot">काठमाडौँ महानगरपालिका &middot; Kathmandu Metropolitan City &middot; Official GeoPortal</div>
+</div>
+</body>
+</html>

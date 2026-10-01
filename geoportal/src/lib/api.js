@@ -26,6 +26,7 @@ export const authAPI = {
 
 export const geoportalAPI = {
   getCatalog: () => api.get('/geoportal/catalog'),
+  getLandingStats: () => api.get('/geoportal/landing-stats'),
   getFeatureDetail: (layerId, featureId) => api.get(`/geoportal/layers/${layerId}/features/${featureId}`),
   exportLayer: (layerId, format = 'geojson', bbox = null) => {
     const params = { format };
@@ -51,6 +52,16 @@ export const analyticsAPI = {
 export const houseNumberingAPI = {
   getStats: () => api.get('/house-numbering/stats'),
   listNumbers: (params = {}) => api.get('/house-numbering/numbers', { params }),
+};
+
+/**
+ * Geo World entry gate — Nepal-only access verification.
+ * accessCheck runs the server-side Nepal / VPN evaluation and issues the
+ * HttpOnly geo-pass cookie on success. verify re-checks the cookie.
+ */
+export const geoAPI = {
+  accessCheck: (payload) => api.post('/geo/access-check', payload || {}),
+  verify: () => api.get('/geo/verify'),
 };
 
 export default api;

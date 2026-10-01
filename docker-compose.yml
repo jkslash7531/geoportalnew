@@ -192,18 +192,16 @@ services:
       retries: 3
 
 volumes:
+  # Managed by Compose (created automatically on first `docker compose up`).
+  # Named explicitly so data survives `docker compose down`.
   pg_data:
     name: kmc_gis_server_pg_data
-    external: true
   redis_data:
     name: kmc_gis_server_redis_data
-    external: true
   tileserver_data:
     name: kmc_gis_server_tileserver_data
-    external: true
   upload_data:
     name: kmc_gis_server_upload_data
-    external: true
 
 networks:
   kmc_net:

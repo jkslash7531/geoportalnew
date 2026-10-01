@@ -18,6 +18,7 @@ from app.schemas import (
 )
 from app.auth import get_current_user, get_optional_current_user, require_role
 from app.helpers import log_audit
+from app.routers.geo_access import require_geo_entry
 
 router = APIRouter(prefix="/api/geoportal", tags=["GeoPortal"])
 
@@ -76,6 +77,7 @@ def filter_fields_for_role(fields_config: Optional[List[Dict[str, Any]]], field_
 async def get_geoportal_catalog(
     db: AsyncSession = Depends(get_db),
     user: Optional[User] = Depends(get_optional_current_user),
+    _geo_entry: bool = Depends(require_geo_entry),
 ):
     """
     Get the GeoPortal Layer Catalog.
@@ -236,6 +238,7 @@ async def get_feature_detail(
     feature_id: int,
     db: AsyncSession = Depends(get_db),
     user: Optional[User] = Depends(get_optional_current_user),
+    _geo_entry: bool = Depends(require_geo_entry),
 ):
     """
     Get full feature detail with field-level permissions strictly applied.
@@ -364,6 +367,7 @@ async def export_geoportal_layer(
     bbox: Optional[str] = Query(None, description="west,south,east,north"),
     db: AsyncSession = Depends(get_db),
     user: Optional[User] = Depends(get_optional_current_user),
+    _geo_entry: bool = Depends(require_geo_entry),
 ):
     """Export layer features respecting role permissions and field-level security."""
     res_l = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id))
@@ -446,3 +450,79 @@ async def export_geoportal_layer(
             media_type="text/csv",
             headers={"Content-Disposition": f"attachment; filename={layer.name}.csv"}
         )
+
+
+@router.get("/landing-stats")
+async def get_landing_stats(db: AsyncSession = Depends(get_db)):
+    """
+    Public lightweight statistics for the GeoPortal landing page.
+    Metadata of the entire database is loaded dynamically — cached 5 minutes.
+    Deliberately public: the Geo World entry gate (not this endpoint) enforces
+    the Nepal-only restriction.
+    """
+    from app.auth import get_redis
+
+    cache_key = "geoportal:landing-stats"
+    try:
+        redis = await get_redis()
+        cached = await redis.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    except Exception:
+        pass
+
+    # Published vector layers (visible to anonymous viewers)
+    vl_query = select(VectorLayer).where(VectorLayer.published_in_geoportal == True)
+    vl_res = await db.execute(vl_query)
+    pub_layers = vl_res.scalars().all()
+
+    total_features = 0
+    categories: Dict[str, int] = {}
+    geometry_types: Dict[str, int] = {}
+    if pub_layers:
+        layer_ids = [l.id for l in pub_layers]
+        cnt_res = await db.execute(
+            select(VectorFeature.layer_id, func.count(VectorFeature.id))
+            .where(VectorFeature.layer_id.in_(layer_ids))
+            .group_by(VectorFeature.layer_id)
+        )
+        counts = dict(cnt_res.all())
+        for lyr in pub_layers:
+            total_features += counts.get(lyr.id, 0)
+            cat = lyr.category or "Uncategorized"
+            categories[cat] = categories.get(cat, 0) + 1
+            gt = str(lyr.geometry_type.value if hasattr(lyr.geometry_type, "value") else lyr.geometry_type)
+            geometry_types[gt] = geometry_types.get(gt, 0) + 1
+
+    mb_res = await db.execute(
+        select(func.count(MBTilesPackage.id)).where(MBTilesPackage.published_in_geoportal == True)
+    )
+    raster_packages = mb_res.scalar() or 0
+
+    # Most recently updated published layer (for a "last updated" hint)
+    latest = None
+    if pub_layers:
+        latest = max(
+            (l.updated_at for l in pub_layers if getattr(l, "updated_at", None)),
+            default=None,
+        )
+
+    payload = {
+        "vector_layers": len(pub_layers),
+        "total_features": total_features,
+        "raster_packages": raster_packages,
+        "categories": [
+            {"name": name, "layers": count}
+            for name, count in sorted(categories.items(), key=lambda kv: kv[1], reverse=True)
+        ],
+        "geometry_types": geometry_types,
+        "wards_covered": 32,
+        "last_updated": latest.isoformat() if latest else None,
+    }
+
+    try:
+        redis = await get_redis()
+        await redis.setex(cache_key, 300, json.dumps(payload, default=str))
+    except Exception:
+        pass
+    return payload
