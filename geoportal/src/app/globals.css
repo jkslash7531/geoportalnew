@@ -1,0 +1,123 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Noto+Sans+Devanagari:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --gov-blue-primary: #0447af;
+  --gov-blue-dark: #02204e;
+  --gov-blue-light: #eef5ff;
+  --gov-red-primary: #c8102e;
+  --gov-gold: #d97706;
+  --gov-border: #d0dceb;
+  --gov-bg: #f4f7fb;
+}
+
+@layer base {
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  html, body {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+    font-family: 'Inter', 'Noto Sans Devanagari', sans-serif;
+    background-color: #f8fafc;
+    color: #0f172a;
+  }
+}
+
+@layer components {
+  /* Official Nepal Government Top Accent Ribbon */
+  .gov-tricolor-bar {
+    height: 4px;
+    background: linear-gradient(90deg, #c8102e 0%, #c8102e 30%, #0447af 30%, #0447af 100%);
+  }
+
+  /* Primary button identical to Field Data Collection */
+  .btn-gov-primary {
+    @apply px-4 py-2 bg-gov-blue-800 hover:bg-gov-blue-900 text-white font-medium rounded-md
+           transition-all duration-150 ease-in-out shadow-sm hover:shadow active:scale-[0.99]
+           disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5;
+  }
+
+  .btn-gov-secondary {
+    @apply px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-md
+           transition-all duration-150 border border-slate-300 active:scale-[0.99]
+           flex items-center justify-center gap-1.5;
+  }
+
+  .btn-gov-outline {
+    @apply px-3 py-1.5 bg-white hover:bg-gov-blue-50 text-gov-blue-800 border border-gov-blue-800/40
+           font-medium rounded-md transition-all duration-150 active:scale-[0.99]
+           flex items-center justify-center gap-1.5;
+  }
+
+  /* Government Panels & Headers */
+  .gov-panel-header {
+    @apply bg-gov-blue-800 text-white px-4 py-2.5 rounded-t-xl font-semibold flex items-center justify-between;
+  }
+}
+
+/* OpenLayers Controls — Official Government Styling */
+.ol-control button {
+  background-color: #ffffff !important;
+  color: #0447af !important;
+  border: 1px solid #cbd5e1 !important;
+  border-radius: 6px !important;
+  font-size: 16px !important;
+  font-weight: bold !important;
+  width: 34px !important;
+  height: 34px !important;
+  cursor: pointer !important;
+  transition: all 0.15s !important;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1) !important;
+}
+
+.ol-control button:hover {
+  background-color: #eef5ff !important;
+  border-color: #0447af !important;
+  color: #02204e !important;
+}
+
+/* Custom scrollbar */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Waving Nepal Flag Animation */
+@keyframes wave-flag {
+  0%, 100% { transform: perspective(300px) rotateY(0deg) skewY(0deg); }
+  20% { transform: perspective(300px) rotateY(8deg) skewY(-1.5deg); }
+  40% { transform: perspective(300px) rotateY(-3deg) skewY(0.8deg); }
+  60% { transform: perspective(300px) rotateY(5deg) skewY(-1deg); }
+  80% { transform: perspective(300px) rotateY(-2deg) skewY(0.5deg); }
+}
+
+.nepal-flag-wave {
+  animation: wave-flag 4s ease-in-out infinite;
+  transform-origin: left center;
+  display: inline-block;
+  will-change: transform;
+}
+
+/* OpenLayers map container */
+.ol-viewport {
+  width: 100% !important;
+  height: 100% !important;
+}
