@@ -38,6 +38,9 @@ redis[hiredis]==5.0.7
 # --- HTTP Client ---
 httpx==0.27.0
 
+# --- GeoIP (Nepal-only access gate; optional local MaxMind DB) ---
+geoip2==4.8.0
+
 # --- Utilities ---
 python-dotenv==1.0.1
 orjson==3.10.6

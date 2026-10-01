@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     # ---- Geofence ----
     GEOFENCE_RADIUS_METERS: float = 50.0
 
+    # ---- Nepal-only Geo Access Gate (Geo World of KMC) ----
+    GEO_PASS_EXPIRE_MINUTES: int = 720  # 12 hours, IP-bound HttpOnly cookie
+    GEO_ALLOW_PRIVATE_IPS: bool = True  # allow LAN/localhost testing & office LAN
+    GEO_STRICT_VPN_BLOCK: bool = True  # block VPN / datacenter / hosting ASNs
+    GEO_IPAPI_TIMEOUT: float = 8.0  # seconds for fallback GeoIP lookup
+
     model_config = {"env_file": ".env", "case_sensitive": True}
 
 

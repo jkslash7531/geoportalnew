@@ -32,6 +32,7 @@ from app.routers import (
     ogcapi,
     mvt,
     geoportal,
+    geo_access,
     analytics,
     house_numbering,
     modules,
@@ -107,6 +108,7 @@ app.include_router(ogcapi.router_open)
 app.include_router(ogcapi.router_secure)
 app.include_router(mvt.router)
 app.include_router(geoportal.router)
+app.include_router(geo_access.router)
 app.include_router(analytics.router)
 app.include_router(house_numbering.router)
 app.include_router(modules.router)

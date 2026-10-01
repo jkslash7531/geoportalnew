@@ -9,6 +9,9 @@ RUN apk add --no-cache openssl
 # Copy hardened Nginx configuration
 COPY default.conf /etc/nginx/conf.d/default.conf
 
+# Geo World gate: self-contained "access denied" page served by nginx itself
+COPY geo-denied.html /usr/share/nginx/html/geo-denied.html
+
 # Copy entrypoint script to ensure SSL certificates exist
 COPY entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
