@@ -72,7 +72,7 @@ export default function FeatureInspectorModal({ inspectedFeature, catalog, onClo
   }, [props, layer, catalog]);
 
   return (
-    <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 bg-white/95 backdrop-blur-md rounded-xl shadow-2xl border border-slate-200 w-11/12 max-w-md overflow-hidden animate-scale-up">
+    <div className="absolute bottom-24 sm:bottom-6 left-1/2 -translate-x-1/2 z-40 bg-white/95 backdrop-blur-md rounded-xl shadow-2xl border border-slate-200 w-[calc(100%-2rem)] sm:w-11/12 max-w-md max-h-[52dvh] sm:max-h-[70dvh] overflow-hidden flex flex-col animate-scale-up">
       {/* Header */}
       <div className="px-3.5 py-2.5 bg-gov-blue-900 text-white flex items-center justify-between">
         <div className="flex items-center gap-2 min-w-0">

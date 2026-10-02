@@ -121,7 +121,7 @@ export default function LayerCatalogPanel({
               </div>
             ) : (
               filteredCategories.map((category) => {
-                const isCatExpanded = expandedCategories[category.name] !== false;
+                const isCatExpanded = expandedCategories[category.name] === true;
                 const activeCountInCat = category.layers.filter((l) => activeLayerIds.has(l.id)).length;
                 // The default "General" bucket shows no header — its layers render flat,
                 // so there is never a "General (N)" label on screen.

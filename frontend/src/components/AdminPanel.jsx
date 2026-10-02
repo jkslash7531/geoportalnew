@@ -73,7 +73,7 @@ export default function AdminPanel({
   const [downloadingLogs, setDownloadingLogs] = useState(false);
   const [togglingSnappingLayerId, setTogglingSnappingLayerId] = useState(null);
   const [styleEditorLayerId, setStyleEditorLayerId] = useState(null); // layer card with style editor open
-  const [styleForm, setStyleForm] = useState({ color: '#3b82f6', width: 3, clickTolerance: 14 });
+  const [styleForm, setStyleForm] = useState({ color: '#3b82f6', width: 3, clickTolerance: 14, hoverMinZoom: '' });
   const [savingStyleLayerId, setSavingStyleLayerId] = useState(null);
   const [fieldConfigModal, setFieldConfigModal] = useState(null); // { layer, activeTab, fields: [], creation_geometry_types: [], geometry_fields_config: {}, loading: false, saving: false }
   const [selectedQuestionnaireProject, setSelectedQuestionnaireProject] = useState(null);
@@ -271,10 +271,12 @@ export default function AdminPanel({
 
   const handleOpenStyleEditor = (layer) => {
     const st = layer.style || {};
+    const hz = st.hoverMinZoom;
     setStyleForm({
       color: st.strokeColor || '#3b82f6',
       width: Number.isFinite(Number(st.strokeWidth)) && Number(st.strokeWidth) > 0 ? Number(st.strokeWidth) : 3,
       clickTolerance: Number.isFinite(Number(st.clickTolerance)) && Number(st.clickTolerance) >= 2 ? Number(st.clickTolerance) : 14,
+      hoverMinZoom: hz === null || hz === undefined || hz === '' ? '' : Number(hz),
     });
     setStyleEditorLayerId(styleEditorLayerId === layer.id ? null : layer.id);
   };
@@ -304,6 +306,9 @@ export default function AdminPanel({
         strokeColor: styleForm.color,
         strokeWidth: Number(styleForm.width),
         clickTolerance: Number(styleForm.clickTolerance),
+        hoverMinZoom: styleForm.hoverMinZoom === '' || styleForm.hoverMinZoom === null
+          ? null
+          : Number(styleForm.hoverMinZoom),
       };
       await layersAPI.update(layer.id, { style: newStyle });
       setAllLayers((prev) =>
@@ -1999,6 +2004,26 @@ export default function AdminPanel({
                           />
                           <span className="text-[10px] text-slate-500 font-nepali">
                             पिक्सेल — जति ठूलो, त्यति सजिलो क्लिक (2–60)
+                          </span>
+                        </div>
+
+                        {/* Hover highlight min zoom (empty = hover highlight OFF) */}
+                        <div className="flex items-center gap-2">
+                          <label className="text-[11px] font-bold text-slate-700 font-nepali w-24 shrink-0">
+                            हभर जुम
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            max="22"
+                            step="1"
+                            value={styleForm.hoverMinZoom}
+                            onChange={(e) => setStyleForm((p) => ({ ...p, hoverMinZoom: e.target.value === '' ? '' : Number(e.target.value) }))}
+                            className="gov-input text-xs py-1 w-20"
+                            placeholder="बन्द"
+                          />
+                          <span className="text-[10px] text-slate-500 font-nepali">
+                            यो जुम वा माथि मात्र हभर हाइलाइट — खाली छोडे बन्द (OFF)
                           </span>
                         </div>
 

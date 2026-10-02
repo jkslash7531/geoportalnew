@@ -288,15 +288,6 @@ function LandingInner() {
             <div className="text-[11px] text-sky-200/80 font-nepali">
               © काठमाडौँ महानगरपालिका, नगर कार्यपालिकाको कार्यालय • Kathmandu Metropolitan City
             </div>
-            <div className="flex items-center gap-3 text-[11px] text-sky-200/70">
-              {stats?.last_updated && (
-                <span>Updated {new Date(stats.last_updated).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
-              )}
-              <span className="inline-flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                Live GIS database
-              </span>
-            </div>
           </div>
         </footer>
       </div>

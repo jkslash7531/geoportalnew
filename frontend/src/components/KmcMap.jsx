@@ -2139,18 +2139,30 @@ export default function KmcMap({
         }
 
         // Non-Edit Mode: Feature Hover Highlighting & Pointer Cursor
+        // NOTE: hover highlight is opt-in per layer — the GIS Admin enables it by
+        // setting a "hover min zoom" on the layer; below that zoom (or when unset)
+        // there is no highlight, so users always know what zoom reveals interactivity.
         if (!editModeRef.current && !drawModeRef.current && featureHighlightSourceRef.current) {
           const visibleVectorLayers = Object.values(layersRef.current.serverVectors)
             .filter((obj) => obj && obj.layer && obj.layer.getVisible())
             .map((obj) => obj.layer);
 
-          const hitVector = map.forEachFeatureAtPixel(evt.pixel, (f, layer) => {
-            const picked = pickFeatureWithinProximity(f, layer, evt.pixel, evt.coordinate);
-            return picked ? picked.feature : null;
+          const pickedHover = map.forEachFeatureAtPixel(evt.pixel, (f, layer) => {
+            return pickFeatureWithinProximity(f, layer, evt.pixel, evt.coordinate);
           }, {
             layerFilter: (l) => visibleVectorLayers.includes(l),
             hitTolerance: 40,
           });
+
+          let hitVector = null;
+          if (pickedHover && pickedHover.layerId) {
+            const lData = serverVectorsRef.current.find((v) => String(v.id) === String(pickedHover.layerId));
+            const hz = lData && lData.style ? lData.style.hoverMinZoom : null;
+            const zoom = map.getView().getZoom();
+            if (hz != null && hz !== '' && Number.isFinite(Number(hz)) && Number(zoom) >= Number(hz)) {
+              hitVector = pickedHover.feature;
+            }
+          }
 
           if (hitVector) {
             map.getTargetElement().style.cursor = 'pointer';

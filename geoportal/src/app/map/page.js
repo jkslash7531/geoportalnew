@@ -253,7 +253,7 @@ export default function GeoPortalHomePage() {
         </aside>
 
         {/* Floating Bottom-Left: Infographics & Analytics (Responsive on all devices) */}
-        <aside className="absolute bottom-6 left-4 z-30 pointer-events-auto">
+        <aside className="absolute bottom-4 sm:bottom-6 left-4 z-30 pointer-events-auto max-w-[calc(100vw-2rem)]">
           <AnalyticsPanel
             layerId={selectedAnalyticsLayerId}
             layerName={selectedLayerObj?.name}
