@@ -166,7 +166,7 @@ function LandingInner() {
               <MunicipalLogo className="w-9 h-9 sm:w-11 sm:h-11 shrink-0" size={44} />
               <div className="leading-tight min-w-0">
                 <div className="text-[10px] sm:text-xs font-semibold text-gov-red-700 font-nepali truncate">
-                  नेपाल सरकार • काठमाडौँ महानगरपालिका
+                  काठमाडौँ महानगरपालिका
                 </div>
                 <div className="text-sm sm:text-base font-bold text-gov-blue-900 font-nepali truncate">
                   एकीकृत खुला भू-स्थानिक पोर्टल
@@ -279,13 +279,6 @@ function LandingInner() {
               </span>
               {!checking && <ChevronRight className="w-5 h-5 text-gov-blue-700 group-hover:translate-x-1 transition-transform" />}
             </button>
-            <div className="mt-4 flex items-center justify-center gap-2 text-sky-200/85 text-[11px] sm:text-xs font-medium">
-              <ShieldCheck className="w-4 h-4 shrink-0" />
-              <span className="font-nepali">नेपालभित्रका दर्शकहरूका लागि मात्र • VPN / प्रोक्सी प्रतिबन्धित</span>
-            </div>
-            <div className="mt-1 text-sky-200/60 text-[10px] sm:text-[11px]">
-              Available to viewers inside Nepal only • VPN and proxy connections are restricted
-            </div>
           </div>
         </main>
 

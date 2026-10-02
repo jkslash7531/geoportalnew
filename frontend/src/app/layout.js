@@ -3,7 +3,7 @@ import { AuthProvider } from '../lib/auth';
 
 export const metadata = {
   title: 'काठमाडौँ महानगरपालिका | भू-सूचना तथा नक्साङ्कन प्रणाली (KMC WebGIS)',
-  description: 'नेपाल सरकार, काठमाडौँ महानगरपालिकाको आधिकारिक भौगोलिक सूचना प्रणाली (Enterprise WebGIS & Spatial Data Infrastructure)',
+  description: 'काठमाडौँ महानगरपालिकाको आधिकारिक भौगोलिक सूचना प्रणाली (Enterprise WebGIS & Spatial Data Infrastructure)',
   keywords: 'KMC, Kathmandu Metropolitan City, GIS, WebGIS, Nepal Government, NDRRMA, Spatial Data, PostGIS',
 };
 

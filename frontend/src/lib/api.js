@@ -200,6 +200,9 @@ export const featuresAPI = {
   getLinked: (featureId) => api.get(`/features/${featureId}/linked`),
   link: (featureId, data) => api.post(`/features/${featureId}/link`, data),
   unlink: (featureId, params) => api.delete(`/features/${featureId}/link`, { params }),
+  split: (featureId, blade) => api.post(`/features/${featureId}/split`, { blade }),
+  merge: (layerId, featureIds) => api.post(`/layers/${layerId}/merge`, { feature_ids: featureIds }),
+  getExtent: (layerId) => api.get(`/layers/${layerId}/extent`),
 };
 
 // ---- Tiles API ----

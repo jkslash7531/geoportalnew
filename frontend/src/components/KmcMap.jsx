@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Navigation, Crosshair, ZoomIn, ZoomOut, Maximize, X, Users, MapPin, ChevronLeft, ChevronRight, Compass } from 'lucide-react';
+import { Navigation, Crosshair, ZoomIn, ZoomOut, Maximize, X, Users, MapPin, ChevronLeft, ChevronRight, Compass, Plus, Minus } from 'lucide-react';
 import { getDistanceToGeoJsonGeometry, GEOFENCE_EDIT_RADIUS_METERS } from '../lib/geoDistance';
 import { getCollectorColor, extractFeatureCollector } from '../lib/collectorPalette';
 
@@ -533,7 +533,45 @@ function distToSegment(p, v, w) {
 }
 
 /**
- * Continuously searches all visible vector layer sources for the closest vertex within tolerance in pixels
+ * Iterates every segment [a, b] of an OL geometry (all parts / rings).
+ */
+function forEachSegment(geom, cb) {
+  if (!geom || typeof cb !== 'function') return;
+  const type = geom.getType();
+  const eachPair = (coords) => {
+    if (!Array.isArray(coords)) return;
+    for (let i = 0; i + 1 < coords.length; i++) {
+      const a = coords[i];
+      const b = coords[i + 1];
+      if (
+        a && b && a.length >= 2 && b.length >= 2 &&
+        isFinite(a[0]) && isFinite(a[1]) && isFinite(b[0]) && isFinite(b[1])
+      ) {
+        cb(a, b);
+      }
+    }
+  };
+  if (type === 'LineString') {
+    eachPair(geom.getCoordinates());
+  } else if (type === 'Polygon' || type === 'MultiLineString') {
+    (geom.getCoordinates() || []).forEach(eachPair);
+  } else if (type === 'MultiPolygon') {
+    (geom.getCoordinates() || []).forEach((poly) => {
+      (poly || []).forEach(eachPair);
+    });
+  } else if (type === 'GeometryCollection' && typeof geom.getGeometries === 'function') {
+    (geom.getGeometries() || []).forEach((g) => forEachSegment(g, cb));
+  }
+}
+
+/**
+ * Continuously searches all visible vector layer sources for the closest snap point
+ * within tolerance in pixels.
+ *
+ * QGIS-style behavior: snaps to VERTICES first, then to SEGMENTS (edges). Segment
+ * snapping is what makes snapping work when zoomed very far in — the click usually
+ * lands mid-segment between two far-apart vertices, where vertex-only snapping
+ * would find nothing within tolerance.
  */
 function findNearestVertex(map, pixel, visibleSources, tolerancePx) {
   if (!map || !pixel || !Array.isArray(visibleSources) || visibleSources.length === 0) return null;
@@ -552,9 +590,8 @@ function findNearestVertex(map, pixel, visibleSources, tolerancePx) {
     coord[1] + mapTolerance,
   ];
 
-  let nearestCoord = null;
-  let minPixelDist = tolerancePx;
-  let nearestFeature = null;
+  let bestVertex = null; // { coordinate, pixelDist, feature }
+  let bestSegment = null; // { coordinate, pixelDist, feature }
 
   visibleSources.forEach((source) => {
     if (!source || typeof source.forEachFeatureInExtent !== 'function') return;
@@ -562,27 +599,58 @@ function findNearestVertex(map, pixel, visibleSources, tolerancePx) {
       source.forEachFeatureInExtent(extent, (feature) => {
         const geom = feature.getGeometry();
         if (!geom) return;
-        const coords = extractCoordinatesFromGeometry(geom);
 
+        // 1. Vertices (highest priority, like QGIS)
+        const coords = extractCoordinatesFromGeometry(geom);
         for (let i = 0; i < coords.length; i++) {
           const c = coords[i];
           if (!c || c.length < 2) continue;
           const vertexPixel = map.getPixelFromCoordinate(c);
           if (!vertexPixel) continue;
           const dist = Math.hypot(vertexPixel[0] - pixel[0], vertexPixel[1] - pixel[1]);
-          if (dist <= minPixelDist) {
-            minPixelDist = dist;
-            nearestCoord = c;
-            nearestFeature = feature;
+          if (dist <= tolerancePx && (!bestVertex || dist < bestVertex.pixelDist)) {
+            bestVertex = { coordinate: c, pixelDist: dist, feature };
           }
         }
+
+        // 2. Segments / edges (project click point onto each segment)
+        const geomType = geom.getType();
+        if (geomType === 'Point' || geomType === 'MultiPoint') return;
+        forEachSegment(geom, (a, b) => {
+          const dx = b[0] - a[0];
+          const dy = b[1] - a[1];
+          const l2 = dx * dx + dy * dy;
+          let t = 0;
+          if (l2 > 0) {
+            t = ((coord[0] - a[0]) * dx + (coord[1] - a[1]) * dy) / l2;
+            t = Math.max(0, Math.min(1, t));
+          }
+          const px = a[0] + t * dx;
+          const py = a[1] + t * dy;
+          const distMap = Math.hypot(coord[0] - px, coord[1] - py);
+          if (distMap <= mapTolerance) {
+            const pixelDist = distMap / resolution;
+            if (pixelDist <= tolerancePx && (!bestSegment || pixelDist < bestSegment.pixelDist)) {
+              bestSegment = { coordinate: [px, py], pixelDist, feature };
+            }
+          }
+        });
       });
     } catch (e) {
       // safe fallback
     }
   });
 
-  return nearestCoord ? { coordinate: nearestCoord, distance: minPixelDist, feature: nearestFeature } : null;
+  // Vertex matches win over segment matches (QGIS priority)
+  const best = bestVertex || bestSegment;
+  return best
+    ? {
+        coordinate: best.coordinate,
+        distance: best.pixelDist,
+        feature: best.feature,
+        snappedTo: bestVertex ? 'vertex' : 'segment',
+      }
+    : null;
 }
 
 /**
@@ -640,6 +708,15 @@ export default function KmcMap({
   onCollectorSelect = null,
   currentUser = null,
   isAdmin = false,
+  // QGIS-style split & merge tools (field data collection edit mode)
+  splitBladeMode = false, // when true, draw a blade LineString across the selected feature to split it
+  onSplitBladeDrawn = null, // (bladeGeoJSON geometry) => void
+  mergeSelectMode = false, // when true, map clicks toggle features into mergeSelection
+  mergeSelection = [], // [featureId, ...] currently picked for merge
+  onMergeToggleFeature = null, // ({ id }) => void
+  // Large-layer viewport (bbox) loading
+  onBboxLoadFeatures = null, // async (layerId, bboxStr) => GeoJSON FeatureCollection
+  bboxReloadTrigger = null, // { layerId, timestamp } -> refresh the bbox source
 }) {
   const mapRef = useRef(null);
   const mapInstance = useRef(null);
@@ -663,6 +740,8 @@ export default function KmcMap({
     featureHighlightSource: null,
     sketchPreviewLayer: null,
     sketchPreviewSource: null,
+    mergeHighlightLayer: null,
+    mergeHighlightSource: null,
     serverRasters: {}, // { [id]: TileLayer }
     serverVectors: {}, // { [id]: { layer: VectorLayer, source: VectorSource } }
   });
@@ -702,6 +781,15 @@ export default function KmcMap({
   const pickLinkedFeatureModeRef = useRef(pickLinkedFeatureMode);
   const onLinkedFeatureSelectRef = useRef(onLinkedFeatureSelect);
   const gpsPositionRef = useRef(gpsPosition);
+  const splitBladeModeRef = useRef(splitBladeMode);
+  const onSplitBladeDrawnRef = useRef(onSplitBladeDrawn);
+  const mergeSelectModeRef = useRef(mergeSelectMode);
+  const mergeSelectionRef = useRef(mergeSelection);
+  const onMergeToggleFeatureRef = useRef(onMergeToggleFeature);
+  const onBboxLoadFeaturesRef = useRef(onBboxLoadFeatures);
+  const splitDrawRef = useRef(null);
+  const mergeHighlightSourceRef = useRef(null);
+  const [bboxLoadingIds, setBboxLoadingIds] = useState([]);
 
   // Helper to check if a vector layer allows snapping (configured by Admin)
   const isLayerSnappable = useCallback((layerId) => {
@@ -728,7 +816,13 @@ export default function KmcMap({
     pickLinkedFeatureModeRef.current = pickLinkedFeatureMode;
     onLinkedFeatureSelectRef.current = onLinkedFeatureSelect;
     gpsPositionRef.current = gpsPosition;
-  }, [drawMode, activeLayerId, editMode, editLayerId, snappingEnabled, snapTolerance, serverVectors, onFeatureInspect, inspectedFeatureId, isCollector, onFeatureBlocked, editSubMode, outlinedTaskIds, outlineAllTasks, pickLinkedFeatureMode, onLinkedFeatureSelect, gpsPosition]);
+    splitBladeModeRef.current = splitBladeMode;
+    onSplitBladeDrawnRef.current = onSplitBladeDrawn;
+    mergeSelectModeRef.current = mergeSelectMode;
+    mergeSelectionRef.current = mergeSelection;
+    onMergeToggleFeatureRef.current = onMergeToggleFeature;
+    onBboxLoadFeaturesRef.current = onBboxLoadFeatures;
+  }, [drawMode, activeLayerId, editMode, editLayerId, snappingEnabled, snapTolerance, serverVectors, onFeatureInspect, inspectedFeatureId, isCollector, onFeatureBlocked, editSubMode, outlinedTaskIds, outlineAllTasks, pickLinkedFeatureMode, onLinkedFeatureSelect, gpsPosition, splitBladeMode, onSplitBladeDrawn, mergeSelectMode, mergeSelection, onMergeToggleFeature, onBboxLoadFeatures]);
 
   // ---- Sync task grid outline mode across tasks ----
   useEffect(() => {
@@ -781,6 +875,7 @@ export default function KmcMap({
           { fromLonLat, toLonLat, transformExtent },
           { default: CircleGeom },
           { default: TextStyle },
+          { bbox: bboxStrategy },
         ] = await Promise.all([
           import('ol/Map'),
           import('ol/View'),
@@ -805,12 +900,13 @@ export default function KmcMap({
           import('ol/proj'),
           import('ol/geom/Circle'),
           import('ol/style/Text'),
+          import('ol/loadingstrategy'),
         ]);
 
         setOlModules({
           Map, View, TileLayer, VectorLayer, OSM, XYZ, VectorSource, GeoJSON,
           Style, Fill, Stroke, CircleStyle, Circle: CircleStyle, TextStyle, Feature, Point, MultiPoint, LineString, Draw, Snap,
-          Select, Modify, CircleGeom, fromLonLat, toLonLat, transformExtent,
+          Select, Modify, CircleGeom, fromLonLat, toLonLat, transformExtent, bboxStrategy,
         });
         setOlLoaded(true);
       } catch (err) {
@@ -1123,6 +1219,45 @@ export default function KmcMap({
       });
       snapIndicatorSourceRef.current = snapIndicatorSource;
 
+      // Merge Selection Highlight Layer (QGIS-style merge: picked features glow purple)
+      const mergeHighlightSource = new VectorSource();
+      const mergeHighlightLayer = new VectorLayer({
+        source: mergeHighlightSource,
+        zIndex: 940,
+        style: (feature) => {
+          const geom = feature ? feature.getGeometry() : null;
+          if (!geom) return [];
+          const type = geom.getType();
+          if (type === 'Polygon' || type === 'MultiPolygon') {
+            return [
+              new Style({
+                fill: new Fill({ color: 'rgba(139, 92, 246, 0.30)' }),
+                stroke: new Stroke({ color: '#7c3aed', width: 3.5, lineDash: [10, 5] }),
+              }),
+            ];
+          }
+          if (type === 'LineString' || type === 'MultiLineString') {
+            return [
+              new Style({
+                stroke: new Stroke({ color: '#7c3aed', width: 6, lineDash: [10, 5] }),
+              }),
+            ];
+          }
+          return [
+            new Style({
+              image: new CircleStyle({
+                radius: 11,
+                fill: new Fill({ color: 'rgba(139, 92, 246, 0.45)' }),
+                stroke: new Stroke({ color: '#7c3aed', width: 3 }),
+              }),
+            }),
+          ];
+        },
+      });
+      mergeHighlightSourceRef.current = mergeHighlightSource;
+      layersRef.current.mergeHighlightLayer = mergeHighlightLayer;
+      layersRef.current.mergeHighlightSource = mergeHighlightSource;
+
       // Persistent Sketch Preview Layer (for newly created or finished feature while form is open)
       const sketchPreviewSource = new VectorSource();
       const sketchPreviewLayer = new VectorLayer({
@@ -1179,7 +1314,7 @@ export default function KmcMap({
 
       const map = new Map({
         target: mapRef.current,
-        layers: [osmLayer, esriLayer, googleLayer, taskLayer, drawnBoundaryLayer, gpsLayer, collectorTrackingLayer, featureHighlightLayer, sketchPreviewLayer, snappingVerticesLayer, snapIndicatorLayer],
+        layers: [osmLayer, esriLayer, googleLayer, taskLayer, drawnBoundaryLayer, gpsLayer, collectorTrackingLayer, featureHighlightLayer, sketchPreviewLayer, snappingVerticesLayer, snapIndicatorLayer, mergeHighlightLayer],
         view: new View({
           center: fromLonLat([85.324, 27.7172]), // Kathmandu default
           zoom: 13,
@@ -1210,6 +1345,8 @@ export default function KmcMap({
         snappingVerticesSource,
         snapIndicatorLayer,
         snapIndicatorSource,
+        mergeHighlightLayer,
+        mergeHighlightSource,
         serverRasters: {},
         serverVectors: {},
       };
@@ -1310,6 +1447,11 @@ export default function KmcMap({
           return;
         }
 
+        // While drawing the split blade, the Draw interaction owns all clicks
+        if (splitBladeModeRef.current) {
+          return;
+        }
+
         highlightVertexAtEvent(evt);
         const resolution = map.getView().getResolution() || 1;
         const toleranceMapUnits = Math.max(snapToleranceRef.current || 20, 20) * resolution;
@@ -1387,6 +1529,29 @@ export default function KmcMap({
               geometry: geomGeojson,
             });
             return;
+          }
+        }
+
+        // --- 0b. Merge Selection Mode (QGIS-style merge: pick features to union) ---
+        if (mergeSelectModeRef.current && editModeRef.current && editLayerIdRef.current) {
+          const editLayerObj = layersRef.current.serverVectors[String(editLayerIdRef.current)];
+          if (editLayerObj && editLayerObj.layer) {
+            const clickedMerge = map.forEachFeatureAtPixel(evt.pixel, (f) => f, {
+              layerFilter: (l) => l === editLayerObj.layer,
+              hitTolerance: 10,
+            });
+            if (clickedMerge) {
+              const fProps = clickedMerge.getProperties ? clickedMerge.getProperties() : {};
+              const fid =
+                (clickedMerge.getId && clickedMerge.getId()) ||
+                (clickedMerge.get ? clickedMerge.get('_id') : null) ||
+                fProps._id ||
+                fProps.id;
+              if (fid != null && onMergeToggleFeatureRef.current) {
+                onMergeToggleFeatureRef.current({ id: fid });
+              }
+              return;
+            }
           }
         }
 
@@ -2110,7 +2275,7 @@ export default function KmcMap({
   // ---- Sync Server Vector (PostGIS) Layers (With Complete Error Isolation) ----
   useEffect(() => {
     if (!olModules || !mapInstance.current) return;
-    const { VectorLayer, VectorSource, GeoJSON, Style, Fill, Stroke, CircleStyle } = olModules;
+    const { VectorLayer, VectorSource, GeoJSON, Style, Fill, Stroke, CircleStyle, bboxStrategy, transformExtent } = olModules;
     const existingVectors = layersRef.current.serverVectors;
 
     // Remove deleted vector layers
@@ -2291,8 +2456,65 @@ export default function KmcMap({
           }
         };
 
+        if (existingVectors[id] && existingVectors[id].bboxMode !== !!layerData.bboxMode) {
+          // Loading strategy changed (full <-> bbox): rebuild the layer cleanly
+          try {
+            mapInstance.current.removeLayer(existingVectors[id].layer);
+          } catch (e) {}
+          delete existingVectors[id];
+        }
+
         if (!existingVectors[id]) {
-          const source = new VectorSource();
+          const isBboxMode = !!layerData.bboxMode;
+          let source;
+          if (isBboxMode && bboxStrategy) {
+            // LARGE LAYER: viewport (bbox) loading — only fetch features inside the
+            // current view extent via the backend bbox filter. Keeps hundreds of
+            // thousands of features usable without downloading everything.
+            const format = new GeoJSON();
+            source = new VectorSource({
+              strategy: bboxStrategy,
+              loader: (extent, resolution, projection) => {
+                const loaderFn = onBboxLoadFeaturesRef.current;
+                if (!loaderFn) return;
+                try {
+                  const wgs = transformExtent(extent, 'EPSG:3857', 'EPSG:4326');
+                  const bboxStr = `${wgs[0].toFixed(6)},${wgs[1].toFixed(6)},${wgs[2].toFixed(6)},${wgs[3].toFixed(6)}`;
+                  setBboxLoadingIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
+                  Promise.resolve(loaderFn(layerData.id, bboxStr))
+                    .then((fc) => {
+                      if (!existingVectors[id] || existingVectors[id].source !== source) return;
+                      let geoJsonData = fc;
+                      if (geoJsonData && !geoJsonData.type && Array.isArray(geoJsonData)) {
+                        geoJsonData = { type: 'FeatureCollection', features: geoJsonData };
+                      }
+                      if (
+                        geoJsonData &&
+                        (geoJsonData.type === 'FeatureCollection' || Array.isArray(geoJsonData.features))
+                      ) {
+                        const parsed = format.readFeatures(geoJsonData, {
+                          dataProjection: 'EPSG:4326',
+                          featureProjection: 'EPSG:3857',
+                        });
+                        const valid = getValidOlFeatures(parsed);
+                        if (valid.length > 0) source.addFeatures(valid);
+                      }
+                    })
+                    .catch((err) => {
+                      console.warn(`[Map] bbox load failed for layer ${id}:`, err?.message || err);
+                    })
+                    .finally(() => {
+                      setBboxLoadingIds((prev) => prev.filter((x) => x !== id));
+                    });
+                } catch (e) {
+                  console.warn(`[Map] bbox loader error for layer ${id}:`, e);
+                  setBboxLoadingIds((prev) => prev.filter((x) => x !== id));
+                }
+              },
+            });
+          } else {
+            source = new VectorSource();
+          }
           const vectorLayer = new VectorLayer({
             source,
             visible: isVisible,
@@ -2305,7 +2527,7 @@ export default function KmcMap({
           });
 
           mapInstance.current.addLayer(vectorLayer);
-          existingVectors[id] = { layer: vectorLayer, source };
+          existingVectors[id] = { layer: vectorLayer, source, bboxMode: isBboxMode };
         } else {
           existingVectors[id].layer.setVisible(isVisible);
           existingVectors[id].layer.setOpacity(opacity);
@@ -2315,7 +2537,8 @@ export default function KmcMap({
         }
 
         // Safely parse and add features only if valid and changed
-        if (layerData.features && existingVectors[id]) {
+        // (bbox-mode layers load their own features per viewport — skip here)
+        if (layerData.features && existingVectors[id] && !existingVectors[id].bboxMode) {
           if (existingVectors[id].lastFeaturesRef !== layerData.features) {
             const source = existingVectors[id].source;
             source.clear();
@@ -3851,6 +4074,115 @@ export default function KmcMap({
     };
   }, [editMode, drawMode, activeLayerId, editLayerId, snappingEnabled, snapTolerance, serverVectors, olModules, isLayerSnappable]);
 
+  // ---- QGIS-style SPLIT: blade LineString drawing interaction ----
+  // Active while splitBladeMode is on. The user draws a line across the selected
+  // feature; on finish the blade geometry (WGS84) is handed to onSplitBladeDrawn.
+  useEffect(() => {
+    if (!mapInstance.current || !olModules) return;
+    const { Draw, VectorSource, VectorLayer, Style, Stroke } = olModules;
+
+    // Remove any previous blade interaction
+    if (splitDrawRef.current) {
+      try {
+        mapInstance.current.removeInteraction(splitDrawRef.current);
+      } catch (e) {}
+      splitDrawRef.current = null;
+    }
+
+    if (!splitBladeMode) return;
+
+    const bladeSource = new VectorSource();
+    const bladeLayer = new VectorLayer({
+      source: bladeSource,
+      zIndex: 980,
+      style: new Style({
+        stroke: new Stroke({ color: '#dc2626', width: 3, lineDash: [12, 8] }),
+      }),
+    });
+    mapInstance.current.addLayer(bladeLayer);
+
+    const draw = new Draw({
+      source: bladeSource,
+      type: 'LineString',
+      maxPoints: 50,
+      style: new Style({
+        stroke: new Stroke({ color: '#dc2626', width: 3, lineDash: [12, 8] }),
+      }),
+    });
+
+    draw.on('drawend', (event) => {
+      try {
+        const { GeoJSON } = olModules;
+        const format = new GeoJSON();
+        const geojson = JSON.parse(
+          format.writeFeature(event.feature, {
+            dataProjection: 'EPSG:4326',
+            featureProjection: 'EPSG:3857',
+          })
+        );
+        if (geojson?.geometry?.type === 'LineString' && geojson.geometry.coordinates?.length >= 2) {
+          if (onSplitBladeDrawnRef.current) {
+            onSplitBladeDrawnRef.current(geojson.geometry);
+          }
+        }
+      } catch (e) {
+        console.warn('[Map] Split blade drawend error:', e);
+      } finally {
+        try {
+          mapInstance.current.removeLayer(bladeLayer);
+        } catch (e) {}
+      }
+    });
+
+    mapInstance.current.addInteraction(draw);
+    splitDrawRef.current = draw;
+
+    return () => {
+      if (splitDrawRef.current) {
+        try {
+          mapInstance.current.removeInteraction(splitDrawRef.current);
+        } catch (e) {}
+        splitDrawRef.current = null;
+      }
+      try {
+        mapInstance.current.removeLayer(bladeLayer);
+      } catch (e) {}
+    };
+  }, [splitBladeMode, olModules]);
+
+  // ---- QGIS-style MERGE: sync picked features into the merge highlight layer ----
+  useEffect(() => {
+    if (!mapInstance.current || !olModules || !mergeHighlightSourceRef.current) return;
+    const src = mergeHighlightSourceRef.current;
+    src.clear();
+    if (!mergeSelectMode || !editLayerId) return;
+    const layerObj = layersRef.current.serverVectors[String(editLayerId)];
+    if (!layerObj || !layerObj.source) return;
+    const ids = new Set((mergeSelection || []).map((x) => String(x)));
+    if (ids.size === 0) return;
+    layerObj.source.forEachFeature((f) => {
+      const fid = f.getId() || f.get('_id') || f.get('id');
+      if (fid != null && ids.has(String(fid))) {
+        try {
+          src.addFeature(f.clone());
+        } catch (e) {}
+      }
+    });
+  }, [mergeSelectMode, mergeSelection, editLayerId, olModules, serverVectors]);
+
+  // ---- Large-layer bbox source refresh trigger ----
+  useEffect(() => {
+    if (!bboxReloadTrigger || !bboxReloadTrigger.layerId || !mapInstance.current) return;
+    const entry = layersRef.current.serverVectors[String(bboxReloadTrigger.layerId)];
+    if (entry && entry.source && entry.bboxMode && typeof entry.source.refresh === 'function') {
+      try {
+        entry.source.refresh();
+      } catch (e) {
+        console.warn('[Map] bbox source refresh error:', e);
+      }
+    }
+  }, [bboxReloadTrigger]);
+
   // ---- Fly to GPS ----
   const flyToGPS = useCallback(() => {
     if (!mapInstance.current || !gpsPosition || !olModules) return;
@@ -3872,6 +4204,38 @@ export default function KmcMap({
 
       {/* Government Map Quick Controls (Bottom Left) */}
       <div className="absolute bottom-[max(2rem,calc(env(safe-area-inset-bottom,0px)+1.75rem))] left-3 flex flex-col gap-1.5 z-20">
+        <button
+          id="zoom-in-btn"
+          onClick={() => {
+            if (mapInstance.current) {
+              const view = mapInstance.current.getView();
+              const z = view.getZoom() || 0;
+              view.animate({ zoom: Math.min(z + 1, view.getMaxZoom() ?? 22), duration: 250 });
+            }
+          }}
+          className="w-9 h-9 rounded-md bg-white hover:bg-gov-blue-50 text-gov-blue-800 border border-slate-300
+                     flex items-center justify-center transition-all shadow-md group"
+          title="जुम इन गर्नुहोस् (Zoom In)"
+        >
+          <Plus className="w-4.5 h-4.5 group-hover:scale-110 transition-transform" />
+        </button>
+
+        <button
+          id="zoom-out-btn"
+          onClick={() => {
+            if (mapInstance.current) {
+              const view = mapInstance.current.getView();
+              const z = view.getZoom() || 0;
+              view.animate({ zoom: Math.max(z - 1, view.getMinZoom() ?? 0), duration: 250 });
+            }
+          }}
+          className="w-9 h-9 rounded-md bg-white hover:bg-gov-blue-50 text-gov-blue-800 border border-slate-300
+                     flex items-center justify-center transition-all shadow-md group"
+          title="जुम आउट गर्नुहोस् (Zoom Out)"
+        >
+          <Minus className="w-4.5 h-4.5 group-hover:scale-110 transition-transform" />
+        </button>
+
         <button
           id="gps-center-btn"
           onClick={flyToGPS}
@@ -3916,6 +4280,16 @@ export default function KmcMap({
           <Maximize className="w-4.5 h-4.5 group-hover:scale-110 transition-transform" />
         </button>
       </div>
+
+      {/* Large-layer viewport loading indicator */}
+      {bboxLoadingIds.length > 0 && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
+          <div className="flex items-center gap-2 bg-gov-blue-950/90 text-white text-[11px] font-nepali font-bold px-3 py-1.5 rounded-full shadow-lg border border-gov-blue-400/40">
+            <span className="w-3 h-3 rounded-full border-2 border-white/40 border-t-white animate-spin" />
+            <span>ठूलो तह लोड हुँदैछ… (Loading viewport features…)</span>
+          </div>
+        </div>
+      )}
 
       {/* Collector Info Popup Card (When GisAdmin clicks a collector marker) */}
       {inspectedCollector && (
