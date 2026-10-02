@@ -3,11 +3,15 @@ KMC-GIS-SERVER Database Initialization
 Creates tables, extensions, and seeds the default superuser.
 """
 
+import asyncio
+import logging
 import os
+import time
 import json
 import sqlite3
 from pathlib import Path
 from sqlalchemy import select, text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import engine, AsyncSessionLocal, Base, init_extensions
@@ -16,6 +20,46 @@ from app.auth import hash_password
 from app.config import get_settings
 
 settings = get_settings()
+
+logger = logging.getLogger(__name__)
+
+# How long (seconds) startup waits for Postgres to accept connections.
+# A fresh machine runs initdb + PostGIS extension loading on a temporary
+# server, which the postgres entrypoint then shuts down before starting the
+# real server — a window where connections are refused even though the
+# healthcheck already reported healthy.
+DB_STARTUP_TIMEOUT = int(os.environ.get("DB_STARTUP_TIMEOUT", "180"))
+
+
+async def _wait_for_database() -> None:
+    """
+    Block until Postgres accepts connections, retrying with backoff.
+
+    Without this, all uvicorn workers crash their lifespan on a fresh machine
+    (ConnectionRefusedError during the entrypoint's server restart) and the
+    backend container enters a restart loop instead of just waiting.
+    """
+    deadline = time.monotonic() + DB_STARTUP_TIMEOUT
+    delay = 1.0
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+            if attempt > 1:
+                logger.info("Database became reachable after %d attempts.", attempt)
+            return
+        except (OSError, asyncio.TimeoutError, DBAPIError) as exc:
+            if time.monotonic() >= deadline:
+                logger.error("Database not reachable after %ds; aborting startup.", DB_STARTUP_TIMEOUT)
+                raise
+            logger.warning(
+                "Database not reachable (attempt %d): %s — retrying in %.0fs",
+                attempt, exc, delay,
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2.0, 10.0)
 
 
 
@@ -143,6 +187,10 @@ async def init_database():
     5. Sync schema columns & indexes
     6. Seed default superuser and platform modules (idempotent)
     """
+    # Wait for Postgres first: on a fresh machine the entrypoint restarts the
+    # server after initdb, and early connection attempts are refused.
+    await _wait_for_database()
+
     async with engine.connect() as conn:
         conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
         # Session-level lock: concurrent workers WAIT here until init finishes.
