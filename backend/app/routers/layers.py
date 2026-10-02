@@ -115,7 +115,9 @@ async def create_layer(
         creation_geometry_types=layer.creation_geometry_types or [layer.geometry_type.value],
         geometry_fields_config=layer.geometry_fields_config or {},
         deleted_at=layer.deleted_at,
-            created_at=layer.created_at,
+        import_status=layer.import_status,
+        import_error=layer.import_error,
+        created_at=layer.created_at,
     )
 
 
@@ -202,7 +204,9 @@ async def list_global_layers(
             creation_geometry_types=layer.creation_geometry_types if (layer.creation_geometry_types and len(layer.creation_geometry_types) > 0) else [layer.geometry_type.value],
             geometry_fields_config=layer.geometry_fields_config or {},
             deleted_at=layer.deleted_at,
-            created_at=layer.created_at,
+        import_status=layer.import_status,
+        import_error=layer.import_error,
+        created_at=layer.created_at,
         ))
     return responses
 
@@ -263,7 +267,9 @@ async def list_project_layers(
             creation_geometry_types=layer.creation_geometry_types if (layer.creation_geometry_types and len(layer.creation_geometry_types) > 0) else [layer.geometry_type.value],
             geometry_fields_config=layer.geometry_fields_config or {},
             deleted_at=layer.deleted_at,
-            created_at=layer.created_at,
+        import_status=layer.import_status,
+        import_error=layer.import_error,
+        created_at=layer.created_at,
         ))
     return responses
 
@@ -307,7 +313,9 @@ async def create_project_layer(
         creation_geometry_types=layer.creation_geometry_types or [layer.geometry_type.value],
         geometry_fields_config=layer.geometry_fields_config or {},
         deleted_at=layer.deleted_at,
-            created_at=layer.created_at,
+        import_status=layer.import_status,
+        import_error=layer.import_error,
+        created_at=layer.created_at,
     )
 
 
@@ -344,7 +352,9 @@ async def update_layer(
         creation_geometry_types=layer.creation_geometry_types if (layer.creation_geometry_types and len(layer.creation_geometry_types) > 0) else [layer.geometry_type.value],
         geometry_fields_config=layer.geometry_fields_config or {},
         deleted_at=layer.deleted_at,
-            created_at=layer.created_at,
+        import_status=layer.import_status,
+        import_error=layer.import_error,
+        created_at=layer.created_at,
     )
 
 
@@ -377,7 +387,9 @@ async def list_deleted_layers(
             creation_geometry_types=layer.creation_geometry_types or [layer.geometry_type.value],
             geometry_fields_config=layer.geometry_fields_config or {},
             deleted_at=layer.deleted_at,
-            created_at=layer.created_at,
+        import_status=layer.import_status,
+        import_error=layer.import_error,
+        created_at=layer.created_at,
         ))
     return responses
 
@@ -447,6 +459,44 @@ async def permanent_delete_layer(
     await db.delete(layer)
     await invalidate_layer_cache(lid)
     return MessageResponse(message=f"Layer '{name}' permanently deleted")
+
+
+@router.get("/layers/{layer_id}", response_model=LayerResponse)
+async def get_layer(
+    layer_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get a single vector layer (used to poll large-import status)."""
+    result = await db.execute(
+        select(VectorLayer).where(
+            VectorLayer.id == layer_id,
+            VectorLayer.deleted_at.is_(None),
+        )
+    )
+    layer = result.scalar_one_or_none()
+    if not layer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")
+    count_result = await db.execute(
+        select(func.count(VectorFeature.id)).where(VectorFeature.layer_id == layer.id)
+    )
+    count = count_result.scalar() or 0
+    fields = await get_or_detect_layer_fields(db, layer)
+    return LayerResponse(
+        id=layer.id, name=layer.name, description=layer.description,
+        geometry_type=layer.geometry_type.value, style=layer.style,
+        editable_by_collectors=layer.editable_by_collectors,
+        allow_snapping=layer.allow_snapping,
+        is_global=layer.is_global, project_id=layer.project_id,
+        project_name=None,
+        feature_count=count, fields_config=fields,
+        creation_geometry_types=layer.creation_geometry_types if (layer.creation_geometry_types and len(layer.creation_geometry_types) > 0) else [layer.geometry_type.value],
+        geometry_fields_config=layer.geometry_fields_config or {},
+        deleted_at=layer.deleted_at,
+        import_status=layer.import_status,
+        import_error=layer.import_error,
+        created_at=layer.created_at,
+    )
 
 
 @router.get("/layers/{layer_id}/fields")
@@ -906,5 +956,7 @@ async def upload_vector_layer(
         is_global=layer.is_global, project_id=layer.project_id,
         feature_count=valid_count, fields_config=layer.fields_config or [],
         deleted_at=layer.deleted_at,
-            created_at=layer.created_at,
+        import_status=layer.import_status,
+        import_error=layer.import_error,
+        created_at=layer.created_at,
     )

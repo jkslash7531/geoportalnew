@@ -164,6 +164,7 @@ export const layersAPI = {
   listGlobal: () => api.get('/layers'),
   listAll: (params = {}) => api.get('/layers', { params: { all_layers: true, ...params } }),
   listProject: (projectId) => api.get(`/projects/${projectId}/layers`),
+  get: (id) => api.get(`/layers/${id}`),
   create: (data) => api.post('/layers', data),
   createProject: (projectId, data) => api.post(`/projects/${projectId}/layers`, data),
   update: (id, data) => api.put(`/layers/${id}`, data),
@@ -244,6 +245,86 @@ export const mediaAPI = {
   }),
   get: (id) => api.get(`/media/${id}`),
 };
+
+// ---- Resumable Chunked Uploads API (files up to 100 GB) ----
+// Splits the file into 32 MB chunks sent as raw bytes, so multi-GB uploads
+// never spool a giant temp file server-side and can resume after a drop.
+export const uploadsAPI = {
+  init: (data) => api.post('/uploads/init', data, { timeout: 30000 }),
+  chunk: (uploadId, index, blob, onUploadProgress) =>
+    api.post(`/uploads/${uploadId}/chunk`, blob, {
+      params: { index },
+      headers: { 'Content-Type': 'application/octet-stream' },
+      timeout: 0,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+      onUploadProgress,
+    }),
+  complete: (uploadId) => api.post(`/uploads/${uploadId}/complete`, {}, { timeout: 0 }),
+  status: (uploadId) => api.get(`/uploads/${uploadId}`),
+  abort: (uploadId) => api.delete(`/uploads/${uploadId}`),
+};
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Upload a file of any size via the resumable chunked API.
+ * @param {File} file
+ * @param {object} meta { kind: 'vector'|'raster', name, description?, is_global, project_id?, editable_by_collectors?, allow_snapping? }
+ * @param {(p:{phase:string,loaded:number,total:number})=>void} onProgress phase: 'uploading' | 'assembling'
+ * @returns the /complete response payload
+ */
+export async function uploadFileResumable(file, meta, onProgress) {
+  const initRes = await uploadsAPI.init({
+    filename: file.name,
+    total_size: file.size,
+    kind: meta.kind,
+    name: meta.name,
+    description: meta.description,
+    is_global: meta.is_global,
+    project_id: meta.project_id,
+    editable_by_collectors: meta.editable_by_collectors,
+    allow_snapping: meta.allow_snapping,
+  });
+  const { upload_id: uploadId, chunk_size: chunkSize, total_chunks: totalChunks } = initRes.data;
+
+  // Resume support: ask the server which chunks are already there.
+  let startIndex = 0;
+  try {
+    const st = await uploadsAPI.status(uploadId);
+    if (st.data && st.data.next_index != null) startIndex = st.data.next_index;
+  } catch { /* fresh upload */ }
+
+  let sentBytes = startIndex * chunkSize;
+  const report = (loaded) => onProgress && onProgress({ phase: 'uploading', loaded, total: file.size });
+
+  for (let i = startIndex; i < totalChunks; i++) {
+    const blob = file.slice(i * chunkSize, Math.min(file.size, (i + 1) * chunkSize));
+    const chunkStart = sentBytes;
+    let attempt = 0;
+    for (;;) {
+      try {
+        await uploadsAPI.chunk(uploadId, i, blob, (e) => {
+          if (e.total || e.loaded) report(chunkStart + (e.loaded || 0));
+        });
+        break;
+      } catch (err) {
+        attempt += 1;
+        if (attempt >= 4) {
+          try { await uploadsAPI.abort(uploadId); } catch { /* ignore */ }
+          throw err;
+        }
+        await sleep(1000 * attempt * attempt); // 1s, 4s, 9s backoff
+      }
+    }
+    sentBytes += blob.size;
+    report(sentBytes);
+  }
+
+  onProgress && onProgress({ phase: 'assembling', loaded: file.size, total: file.size });
+  const doneRes = await uploadsAPI.complete(uploadId);
+  return doneRes.data;
+}
 
 // ---- Helper: Trigger Browser Blob File Download ----
 export const triggerFileDownload = (response, defaultFilename = 'download') => {

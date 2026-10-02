@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     TILESERVER_DATA_DIR: str = "/tileserver-data"
 
     # ---- Upload ----
-    MAX_UPLOAD_SIZE_MB: int = 8192
+    MAX_UPLOAD_SIZE_MB: int = 102400
     UPLOAD_DIR: str = "/app/uploads"
 
     # ---- CORS ----
