@@ -1,4 +1,4 @@
-name: kmc_gis_server
+name: kmc-gis-server
 
 services:
   # ============================================================
