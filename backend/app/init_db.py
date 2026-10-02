@@ -82,6 +82,8 @@ _SYNC_SQLS = [
             "CREATE INDEX IF NOT EXISTS idx_vl_deleted_at ON vector_layers(deleted_at);",
             "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS import_status VARCHAR(20) DEFAULT 'complete' NOT NULL;",
             "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS import_error TEXT;",
+            "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS import_total INTEGER DEFAULT 0 NOT NULL;",
+            "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS import_count INTEGER DEFAULT 0 NOT NULL;",
             "ALTER TABLE mbtiles_packages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;",
             "CREATE INDEX IF NOT EXISTS idx_mb_deleted_at ON mbtiles_packages(deleted_at);",
     "ALTER TABLE mbtiles_packages ALTER COLUMN file_size TYPE BIGINT;",

@@ -218,6 +218,8 @@ class VectorLayer(Base):
     # Large-file import state (chunked uploads): complete | importing | failed
     import_status = Column(String(20), default="complete", nullable=False)
     import_error = Column(Text, nullable=True)
+    import_total = Column(Integer, default=0, nullable=False)
+    import_count = Column(Integer, default=0, nullable=False)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

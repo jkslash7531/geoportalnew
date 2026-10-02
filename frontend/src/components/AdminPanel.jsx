@@ -257,7 +257,18 @@ export default function AdminPanel({
             });
             break;
           }
-          setUploadProgress({ percent: 100, loaded: file.size, total: file.size, phase: 'importing' });
+          setUploadProgress((prev) => {
+            const total = layer.import_total || 0;
+            const done = layer.import_count || 0;
+            const percent = total > 0 ? Math.min(99, Math.round((done * 100) / total)) : 99;
+            return {
+              percent,
+              loaded: done,
+              total,
+              phase: 'importing',
+              label: total > 0 ? `${done.toLocaleString()} / ${total.toLocaleString()} फिचर` : 'फिचर आयात हुँदैछ...',
+            };
+          });
           if (Date.now() > deadline) {
             setMessage({ type: 'success', text: 'भेक्टर तह अपलोड भयो — फिचर आयात पृष्ठभूमिमा जारी छ' });
             break;
@@ -1800,7 +1811,7 @@ export default function AdminPanel({
                   <div className="space-y-1 py-1">
                     <div className="flex justify-between text-xs text-slate-600 font-semibold font-nepali">
                       <span>{uploadProgress.phase === 'importing' ? 'फिचर आयात हुँदैछ... (पृष्ठभूमिमा जारी छ)' : uploadProgress.phase === 'assembling' ? 'फाइल जोडिँदैछ...' : 'अपलोड हुँदैछ...'}</span>
-                      <span className="font-mono text-gov-blue-800 font-bold">{uploadProgress.percent}%</span>
+                      <span className="font-mono text-gov-blue-800 font-bold">{uploadProgress.label || `${uploadProgress.percent}%`}</span>
                     </div>
                     <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
                       <div
@@ -2365,7 +2376,7 @@ export default function AdminPanel({
                   <div className="space-y-1 py-1">
                     <div className="flex justify-between text-xs text-slate-600 font-semibold font-nepali">
                       <span>{uploadProgress.phase === 'importing' ? 'फिचर आयात हुँदैछ... (पृष्ठभूमिमा जारी छ)' : uploadProgress.phase === 'assembling' ? 'फाइल जोडिँदैछ...' : 'अपलोड हुँदैछ...'}</span>
-                      <span className="font-mono text-gov-blue-800 font-bold">{uploadProgress.percent}%</span>
+                      <span className="font-mono text-gov-blue-800 font-bold">{uploadProgress.label || `${uploadProgress.percent}%`}</span>
                     </div>
                     <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
                       <div
