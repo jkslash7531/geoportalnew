@@ -798,6 +798,16 @@ export default function KmcMap({
     return lData ? (lData.allow_snapping !== false) : true;
   }, []);
 
+  // Per-layer click proximity in pixels (GIS Admin configurable via layer style).
+  // Makes features easy to click when near, without exact pinpointing.
+  const getLayerClickTolerance = useCallback((layerId) => {
+    const DEFAULT_TOL = 14;
+    if (!layerId) return DEFAULT_TOL;
+    const lData = (serverVectorsRef.current || []).find((v) => String(v.id) === String(layerId));
+    const t = lData && lData.style ? Number(lData.style.clickTolerance) : NaN;
+    return Number.isFinite(t) && t >= 2 && t <= 60 ? t : DEFAULT_TOL;
+  }, []);
+
   useEffect(() => {
     drawModeRef.current = drawMode;
     activeLayerIdRef.current = activeLayerId;
@@ -1415,6 +1425,28 @@ export default function KmcMap({
         return true;
       };
 
+      // QGIS-like proximity picking: returns { feature, layer, layerId } when the
+      // click is within the layer's configured click proximity (px) of the feature,
+      // measured to the closest point on the geometry. Null otherwise.
+      const pickFeatureWithinProximity = (f, layer, pixel, coordinate) => {
+        if (!f || !layer || !pixel || !coordinate) return null;
+        const foundEntry = Object.entries(layersRef.current.serverVectors).find(
+          ([id, obj]) => obj && obj.layer === layer
+        );
+        const layerId = foundEntry ? foundEntry[0] : null;
+        const tol = getLayerClickTolerance(layerId);
+        try {
+          const geom = f.getGeometry();
+          if (!geom) return null;
+          const closest = geom.getClosestPoint(coordinate);
+          const cpx = map.getPixelFromCoordinate(closest);
+          if (!cpx) return null;
+          const dist = Math.hypot(cpx[0] - pixel[0], cpx[1] - pixel[1]);
+          if (dist <= tol) return { feature: f, layer, layerId };
+        } catch (e) {}
+        return null;
+      };
+
       // Helper to validate whether a clicked/tapped task grid should be selected or ignored based on outline mode
       const isTaskHitValid = (f, coordinate, resolution) => {
         if (!f || !coordinate) return false;
@@ -1536,9 +1568,12 @@ export default function KmcMap({
         if (mergeSelectModeRef.current && editModeRef.current && editLayerIdRef.current) {
           const editLayerObj = layersRef.current.serverVectors[String(editLayerIdRef.current)];
           if (editLayerObj && editLayerObj.layer) {
-            const clickedMerge = map.forEachFeatureAtPixel(evt.pixel, (f) => f, {
+            const clickedMerge = map.forEachFeatureAtPixel(evt.pixel, (f, layer) => {
+              const picked = pickFeatureWithinProximity(f, layer, evt.pixel, evt.coordinate);
+              return picked ? picked.feature : null;
+            }, {
               layerFilter: (l) => l === editLayerObj.layer,
-              hitTolerance: 10,
+              hitTolerance: 40,
             });
             if (clickedMerge) {
               const fProps = clickedMerge.getProperties ? clickedMerge.getProperties() : {};
@@ -1649,19 +1684,15 @@ export default function KmcMap({
                 const visibleLayers = visibleEntries.map(([id, obj]) => obj.layer);
 
                 const hit = map.forEachFeatureAtPixel(evt.pixel, (f, layer) => {
-                  const found = visibleEntries.find(([id, obj]) => obj.layer === layer);
-                  if (found && isFeatureHitValid(f, found[0], evt.coordinate, resolution)) {
-                    return { feature: f, layerId: parseInt(found[0], 10) };
-                  }
-                  return null;
+                  return pickFeatureWithinProximity(f, layer, evt.pixel, evt.coordinate);
                 }, {
                   layerFilter: (l) => visibleLayers.includes(l),
-                  hitTolerance: touchHitTol,
+                  hitTolerance: 40,
                 });
 
                 if (hit) {
                   clickedOtherFeature = hit.feature;
-                  otherLayerId = hit.layerId;
+                  otherLayerId = parseInt(hit.layerId, 10);
                   otherLayerData = serverVectorsRef.current.find((v) => String(v.id) === String(otherLayerId));
                   editLayerIdRef.current = otherLayerId;
                 }
@@ -2011,17 +2042,10 @@ export default function KmcMap({
             .map((obj) => obj.layer);
 
           const clickedVector = map.forEachFeatureAtPixel(evt.pixel, (f, layer) => {
-            const foundEntry = Object.entries(layersRef.current.serverVectors).find(
-              ([id, obj]) => obj && obj.layer === layer
-            );
-            const layerId = foundEntry ? foundEntry[0] : null;
-            if (f && layerId && isFeatureHitValid(f, layerId, evt.coordinate, resolution)) {
-              return { feature: f, layer, layerId };
-            }
-            return null;
+            return pickFeatureWithinProximity(f, layer, evt.pixel, evt.coordinate);
           }, {
             layerFilter: (l) => visibleVectorLayers.includes(l),
-            hitTolerance: touchHitTol,
+            hitTolerance: 40,
           });
 
           if (clickedVector && clickedVector.feature && clickedVector.layerId) {
@@ -2121,17 +2145,11 @@ export default function KmcMap({
             .map((obj) => obj.layer);
 
           const hitVector = map.forEachFeatureAtPixel(evt.pixel, (f, layer) => {
-            const foundEntry = Object.entries(layersRef.current.serverVectors).find(
-              ([id, obj]) => obj && obj.layer === layer
-            );
-            const layerId = foundEntry ? foundEntry[0] : null;
-            if (f && layerId && isFeatureHitValid(f, layerId, evt.coordinate, resolution)) {
-              return f;
-            }
-            return null;
+            const picked = pickFeatureWithinProximity(f, layer, evt.pixel, evt.coordinate);
+            return picked ? picked.feature : null;
           }, {
             layerFilter: (l) => visibleVectorLayers.includes(l),
-            hitTolerance: 6,
+            hitTolerance: 40,
           });
 
           if (hitVector) {
@@ -2287,15 +2305,21 @@ export default function KmcMap({
     });
 
     // Add / update vector layers
+    // Distinct default color per layer (admin can override via layer style settings)
     const colorPalette = [
-      '#10b981', '#3b82f6', '#8b5cf6', '#f59e0b', '#ec4899', '#06b6d4', '#f97316'
+      '#10b981', '#3b82f6', '#8b5cf6', '#f59e0b', '#ec4899', '#06b6d4',
+      '#f97316', '#14b8a6', '#84cc16', '#f43f5e', '#a855f7', '#0ea5e9',
     ];
 
     serverVectors.forEach((layerData, idx) => {
       const id = String(layerData.id);
       const isVisible = layerData.visible !== false;
       const opacity = (layerData.opacity ?? 100) / 100;
-      const color = colorPalette[idx % colorPalette.length];
+      const adminStyle = layerData.style || {};
+      const color = adminStyle.strokeColor || colorPalette[idx % colorPalette.length];
+      const adminWidth = Number(adminStyle.strokeWidth);
+      const polyWidth = Number.isFinite(adminWidth) && adminWidth > 0 ? adminWidth : 2.5;
+      const lineWidth = Number.isFinite(adminWidth) && adminWidth > 0 ? adminWidth : 3;
       const geomType = (layerData.geometry_type || '').toUpperCase();
 
       // Smart Z-Index: Polygons base, LineStrings elevated, Points top
@@ -2439,11 +2463,11 @@ export default function KmcMap({
           if (isPoly) {
             return new Style({
               fill: new Fill({ color: `${color}33` }),
-              stroke: new Stroke({ color: color, width: 2.5 }),
+              stroke: new Stroke({ color: color, width: polyWidth }),
             });
           } else if (type.includes('LINE')) {
             return new Style({
-              stroke: new Stroke({ color: color, width: 3 }),
+              stroke: new Stroke({ color: color, width: lineWidth }),
             });
           } else {
             return new Style({

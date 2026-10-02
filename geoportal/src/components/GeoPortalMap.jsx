@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  ZoomIn, ZoomOut, Maximize, Compass, Layers, Check, Navigation, Loader2, Eye, EyeOff, PenTool, MapPin
+  ZoomIn, ZoomOut, Maximize, Compass, Layers, Check, Navigation, Loader2, Eye, EyeOff, PenTool, MapPin,
+  ChevronUp, ChevronDown, Tag, X, Ruler
 } from 'lucide-react';
 
 // Attractive categorical palette for the 32 municipal wards
@@ -26,6 +27,7 @@ export default function GeoPortalMap({
   activeBasemap = 'osm',
   basemapOpacity = 100,
   zoomToLayerTrigger = null,
+  isAdmin = false,
 }) {
   const mapRef = useRef(null);
   const mapInstance = useRef(null);
@@ -43,13 +45,25 @@ export default function GeoPortalMap({
   // Municipal ward boundaries (always-on layer)
   const [wardOutlineOnly, setWardOutlineOnly] = useState(false);
   const [wardVisible, setWardVisible] = useState(true);
+  const [wardCollapsed, setWardCollapsed] = useState(false);
   const [wardList, setWardList] = useState([]); // [ward_no, ...] sorted
   const [hoveredWard, setHoveredWard] = useState(null);
   const [wardZoomSel, setWardZoomSel] = useState('');
+  const [isolatedWard, setIsolatedWard] = useState(null); // ward_no shown alone when picked
+  const [wardLabels, setWardLabels] = useState(true);
+  const [showWardArea, setShowWardArea] = useState(() => {
+    try {
+      const v = localStorage.getItem('kmc_ward_show_area');
+      return v === null ? true : v === '1';
+    } catch (e) { return true; }
+  });
   const wardLayerRef = useRef(null);
   const wardSourceRef = useRef(null);
   const wardOutlineOnlyRef = useRef(false);
   const hoveredWardRef = useRef(null);
+  const isolatedWardRef = useRef(null);
+  const wardLabelsRef = useRef(true);
+  const showWardAreaRef = useRef(true);
 
   // Dynamic OpenLayers load (SSR-Safe)
   useEffect(() => {
@@ -73,6 +87,7 @@ export default function GeoPortalMap({
           { default: Stroke },
           { default: CircleStyle },
           { default: Text },
+          { default: LineString },
           { fromLonLat, toLonLat, transformExtent },
         ] = await Promise.all([
           import('ol/Map'),
@@ -91,6 +106,7 @@ export default function GeoPortalMap({
           import('ol/style/Stroke'),
           import('ol/style/Circle'),
           import('ol/style/Text'),
+          import('ol/geom/LineString'),
           import('ol/proj'),
         ]);
 
@@ -98,7 +114,7 @@ export default function GeoPortalMap({
           setOlModules({
             Map, View, TileLayer, VectorTileLayer, VectorLayer,
             OSM, XYZ, VectorTileSource, VectorSource, MVT, GeoJSON,
-            Style, Fill, Stroke, CircleStyle, Text,
+            Style, Fill, Stroke, CircleStyle, Text, LineString,
             fromLonLat, toLonLat, transformExtent,
           });
           setOlLoaded(true);
@@ -216,8 +232,40 @@ export default function GeoPortalMap({
       });
 
       if (feature && feature.feature) {
+        const wardLayer = wardLayerRef.current;
+        const isWardClick = wardLayer && feature.layer === wardLayer;
+        // In outline-only mode, clicks inside the ward (away from the boundary
+        // line) must not open the ward info popup.
+        if (isWardClick && wardOutlineOnlyRef.current) {
+          const geom = feature.feature.getGeometry();
+          let nearBoundary = false;
+          try {
+            const polys = geom && geom.getType() === 'MultiPolygon' ? geom.getPolygons() : (geom ? [geom] : []);
+            for (const poly of polys) {
+              const ring = poly.getLinearRing ? poly.getLinearRing(0) : null;
+              if (!ring) continue;
+              const line = new LineString(ring.getCoordinates());
+              const closest = line.getClosestPoint(evt.coordinate);
+              const cpx = map.getPixelFromCoordinate(closest);
+              if (cpx && Math.hypot(cpx[0] - evt.pixel[0], cpx[1] - evt.pixel[1]) <= 8) {
+                nearBoundary = true;
+                break;
+              }
+            }
+          } catch (e) {}
+          if (!nearBoundary) {
+            onFeatureClick?.(null);
+            return;
+          }
+        }
+        const props = { ...feature.feature.getProperties() };
+        delete props.geometry;
+        // GIS Admin can hide the ward area from the info popup
+        if (isWardClick && !showWardAreaRef.current) {
+          delete props.area_km2;
+        }
         onFeatureClick?.({
-          properties: feature.feature.getProperties(),
+          properties: props,
           layerName: feature.layer?.get('layerName') || 'Vector Feature',
           layerId: feature.layer?.get('layerId'),
         });
@@ -238,6 +286,11 @@ export default function GeoPortalMap({
     if (!olModules) return [];
     const { Style, Fill, Stroke, Text } = olModules;
     const wn = feature.get('ward_no');
+    // Single-ward isolation: hide every other ward's boundary when one is picked
+    if (isolatedWardRef.current != null && isolatedWardRef.current !== '' &&
+        String(isolatedWardRef.current) !== String(wn)) {
+      return [];
+    }
     const base = wardBaseColor(wn);
     const isHover = hoveredWardRef.current != null && String(hoveredWardRef.current) === String(wn);
     const outlineOnly = wardOutlineOnlyRef.current;
@@ -247,10 +300,10 @@ export default function GeoPortalMap({
         stroke: new Stroke({ color: isHover ? '#0f172a' : base, width: isHover ? 3.5 : 1.8 }),
       }),
     ];
-    // Ward number label on the polygon interior point (only when zoomed in a bit)
+    // Ward number label on the polygon interior point (only when zoomed in a bit; toggleable)
     try {
       const zoom = mapInstance.current ? mapInstance.current.getView().getZoom() : 13;
-      if (zoom >= 11) {
+      if (wardLabelsRef.current && zoom >= 11) {
         const geom = feature.getGeometry();
         const labelGeom = geom && typeof geom.getInteriorPoint === 'function' ? geom.getInteriorPoint() : null;
         styles.push(
@@ -279,6 +332,18 @@ export default function GeoPortalMap({
     hoveredWardRef.current = hoveredWard;
     if (wardLayerRef.current) wardLayerRef.current.changed();
   }, [hoveredWard]);
+  useEffect(() => {
+    isolatedWardRef.current = isolatedWard;
+    if (wardLayerRef.current) wardLayerRef.current.changed();
+  }, [isolatedWard]);
+  useEffect(() => {
+    wardLabelsRef.current = wardLabels;
+    if (wardLayerRef.current) wardLayerRef.current.changed();
+  }, [wardLabels]);
+  useEffect(() => {
+    showWardAreaRef.current = showWardArea;
+    try { localStorage.setItem('kmc_ward_show_area', showWardArea ? '1' : '0'); } catch (e) {}
+  }, [showWardArea]);
   useEffect(() => {
     if (wardLayerRef.current) wardLayerRef.current.setVisible(wardVisible);
   }, [wardVisible]);
@@ -440,8 +505,14 @@ export default function GeoPortalMap({
         if (isLayerActive) {
           const isPolygon = (layer.geometry_type || '').toUpperCase().includes('POLYGON') || (layer.geometry_type || '').toUpperCase() === 'GEOMETRY';
           const isOutlined = layerOutlines[layer.id] !== undefined ? layerOutlines[layer.id] : true;
-          const strokeColor = layer.style?.strokeColor || '#0447AF';
-          const fillColor = layer.style?.fillColor || '#0447AF';
+          // Distinct default color per layer (stable by layer id); admin-set style wins
+          const LAYER_PALETTE = [
+            '#0447AF', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899',
+            '#06b6d4', '#84cc16', '#f97316', '#14b8a6', '#a855f7', '#0ea5e9',
+          ];
+          const paletteColor = LAYER_PALETTE[Math.abs(Number(layer.id) || 0) % LAYER_PALETTE.length];
+          const strokeColor = layer.style?.strokeColor || paletteColor;
+          const fillColor = layer.style?.fillColor || paletteColor;
           const strokeWidth = layer.style?.strokeWidth || 2;
           const pointRadius = layer.style?.pointRadius || 6;
 
@@ -636,15 +707,26 @@ export default function GeoPortalMap({
             <MapPin className="w-3.5 h-3.5 text-gov-gold-400" />
             वडा सीमाना
           </span>
-          <button
-            onClick={() => setWardVisible((v) => !v)}
-            className="p-1 hover:bg-white/15 rounded transition-colors"
-            title={wardVisible ? 'वडा सीमा लुकाउनुहोस् (Hide)' : 'वडा सीमा देखाउनुहोस् (Show)'}
-          >
-            {wardVisible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-          </button>
+          <div className="flex items-center gap-0.5">
+            {/* Hide button: hides wards from the map canvas only (does not collapse) */}
+            <button
+              onClick={() => setWardVisible((v) => !v)}
+              className="p-1 hover:bg-white/15 rounded transition-colors"
+              title={wardVisible ? 'वडा सीमा लुकाउनुहोस् (Hide from map)' : 'वडा सीमा देखाउनुहोस् (Show on map)'}
+            >
+              {wardVisible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+            </button>
+            {/* Collapse button: collapses the dialog only */}
+            <button
+              onClick={() => setWardCollapsed((v) => !v)}
+              className="p-1 hover:bg-white/15 rounded transition-colors"
+              title={wardCollapsed ? 'डायलग खोल्नुहोस् (Expand)' : 'डायलग सङ्कुचित गर्नुहोस् (Collapse)'}
+            >
+              {wardCollapsed ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
+            </button>
+          </div>
         </div>
-        {wardVisible && (
+        {!wardCollapsed && (
           <div className="p-2.5 flex flex-col gap-2">
             <button
               onClick={() => setWardOutlineOnly((v) => !v)}
@@ -658,13 +740,43 @@ export default function GeoPortalMap({
               <PenTool className="w-3.5 h-3.5" />
               {wardOutlineOnly ? 'रंग भर्नुहोस् (Fill)' : 'रेखा मात्र (Outline)'}
             </button>
+            {/* Labels on/off */}
+            <button
+              onClick={() => setWardLabels((v) => !v)}
+              className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-[11px] font-bold font-nepali border transition-colors ${
+                wardLabels
+                  ? 'bg-gov-blue-800 text-white border-gov-blue-900'
+                  : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+              }`}
+              title="वडा नम्बर लेबल देखाउने / लुकाउने (Toggle ward labels)"
+            >
+              <Tag className="w-3.5 h-3.5" />
+              {wardLabels ? 'लेबल लुकाउनुहोस्' : 'लेबल देखाउनुहोस्'}
+            </button>
+            {/* Admin-only: show/hide ward area in the info popup */}
+            {isAdmin && (
+              <button
+                onClick={() => setShowWardArea((v) => !v)}
+                className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-[11px] font-bold font-nepali border transition-colors ${
+                  showWardArea
+                    ? 'bg-emerald-700 text-white border-emerald-800'
+                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                }`}
+                title="वडामा क्लिक गर्दा क्षेत्रफल देखाउने / लुकाउने (Admin: show area in ward info)"
+              >
+                <Ruler className="w-3.5 h-3.5" />
+                {showWardArea ? 'क्षेत्रफल: देखाइँदै' : 'क्षेत्रफल: लुकाइएको'}
+              </button>
+            )}
             <label className="text-[10px] font-bold text-slate-500 font-nepali">
               वडामा जुम गर्नुहोस्
               <select
                 value={wardZoomSel}
                 onChange={(e) => {
-                  setWardZoomSel(e.target.value);
-                  if (e.target.value) zoomToWard(e.target.value);
+                  const v = e.target.value;
+                  setWardZoomSel(v);
+                  setIsolatedWard(v || null);
+                  if (v) zoomToWard(v);
                 }}
                 className="mt-1 w-full text-[11px] font-sans border border-slate-300 rounded-lg px-2 py-1.5 bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-gov-blue-500"
               >
@@ -676,6 +788,20 @@ export default function GeoPortalMap({
                 ))}
               </select>
             </label>
+            {/* Clear single-ward isolation */}
+            {isolatedWard != null && isolatedWard !== '' && (
+              <button
+                onClick={() => {
+                  setIsolatedWard(null);
+                  setWardZoomSel('');
+                }}
+                className="flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-[11px] font-bold font-nepali border bg-white text-slate-700 border-slate-300 hover:bg-slate-50 transition-colors"
+                title="सबै वडाको सीमा फेरि देखाउनुहोस् (Show all ward boundaries)"
+              >
+                <X className="w-3.5 h-3.5" />
+                सबै वडा देखाउनुहोस्
+              </button>
+            )}
             {hoveredWard != null && (
               <div className="text-[11px] font-bold text-gov-blue-900 font-nepali bg-gov-blue-50 border border-gov-blue-200 rounded-lg px-2 py-1 text-center">
                 वडा नं. {hoveredWard}

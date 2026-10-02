@@ -224,6 +224,7 @@ export default function GeoPortalHomePage() {
           activeBasemap={activeBasemap}
           basemapOpacity={basemapOpacity}
           zoomToLayerTrigger={zoomToLayerTrigger}
+          isAdmin={catalog?.is_admin === true}
         />
 
         {/* Floating Top-Right: Layer Catalog (Field Data style panel with Basemaps included) */}

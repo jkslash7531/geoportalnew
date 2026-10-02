@@ -49,6 +49,9 @@ bun-debug.log*
 frontend/.next/
 frontend/out/
 frontend/.vercel
+geoportal/.next/
+geoportal/out/
+geoportal/.vercel
 
 # ---- Docker ----
 docker-compose.override.yml
