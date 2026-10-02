@@ -123,10 +123,14 @@ export default function LayerCatalogPanel({
               filteredCategories.map((category) => {
                 const isCatExpanded = expandedCategories[category.name] !== false;
                 const activeCountInCat = category.layers.filter((l) => activeLayerIds.has(l.id)).length;
+                // The default "General" bucket shows no header — its layers render flat,
+                // so there is never a "General (N)" label on screen.
+                const isGeneralBucket = category.name === 'General';
 
                 return (
                   <div key={category.name} className="border border-slate-200 rounded-lg overflow-hidden bg-white shadow-xs">
-                    {/* Category Title Header */}
+                    {/* Category Title Header (hidden for the General bucket) */}
+                    {!isGeneralBucket && (
                     <button
                       onClick={() => toggleCategory(category.name)}
                       className="w-full px-3 py-2 bg-slate-100/90 hover:bg-slate-200/80 flex items-center justify-between text-left transition-colors"
@@ -152,9 +156,10 @@ export default function LayerCatalogPanel({
                         </span>
                       </div>
                     </button>
+                    )}
 
-                    {/* Layers in Category */}
-                    {isCatExpanded && (
+                    {/* Layers in Category (General bucket always expanded) */}
+                    {(isGeneralBucket || isCatExpanded) && (
                       <div className="divide-y divide-slate-100">
                         {category.layers.map((layer) => {
                           const isActive = activeLayerIds.has(layer.id);

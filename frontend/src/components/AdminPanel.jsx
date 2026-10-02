@@ -10,6 +10,7 @@ import {
   UserCheck, UserX, Shield, FolderCheck, Download, FileDown, FileText,
   Radio, Navigation, Crosshair, Clock, Magnet, Sliders, Asterisk,
   ClipboardList, CheckSquare, ArrowUp, ArrowDown, Eye, EyeOff, Key, Hash, ListOrdered,
+  Palette, Wand2, MousePointerClick, Save,
 } from 'lucide-react';
 import { useAuth } from '../lib/auth';
 import {
@@ -71,6 +72,9 @@ export default function AdminPanel({
   const [downloadingTileId, setDownloadingTileId] = useState(null);
   const [downloadingLogs, setDownloadingLogs] = useState(false);
   const [togglingSnappingLayerId, setTogglingSnappingLayerId] = useState(null);
+  const [styleEditorLayerId, setStyleEditorLayerId] = useState(null); // layer card with style editor open
+  const [styleForm, setStyleForm] = useState({ color: '#3b82f6', width: 3, clickTolerance: 14 });
+  const [savingStyleLayerId, setSavingStyleLayerId] = useState(null);
   const [fieldConfigModal, setFieldConfigModal] = useState(null); // { layer, activeTab, fields: [], creation_geometry_types: [], geometry_fields_config: {}, loading: false, saving: false }
   const [selectedQuestionnaireProject, setSelectedQuestionnaireProject] = useState(null);
   const [selectedRecordsProjectId, setSelectedRecordsProjectId] = useState(activeProject?.id || null);
@@ -256,6 +260,68 @@ export default function AdminPanel({
       });
     } finally {
       setTogglingSnappingLayerId(null);
+    }
+  };
+
+  // ---- Layer Style Editor (GIS Admin: color / thickness / click proximity) ----
+  const STYLE_AUTO_PALETTE = [
+    '#10b981', '#3b82f6', '#8b5cf6', '#f59e0b', '#ec4899', '#06b6d4',
+    '#f97316', '#14b8a6', '#84cc16', '#f43f5e', '#a855f7', '#0ea5e9',
+  ];
+
+  const handleOpenStyleEditor = (layer) => {
+    const st = layer.style || {};
+    setStyleForm({
+      color: st.strokeColor || '#3b82f6',
+      width: Number.isFinite(Number(st.strokeWidth)) && Number(st.strokeWidth) > 0 ? Number(st.strokeWidth) : 3,
+      clickTolerance: Number.isFinite(Number(st.clickTolerance)) && Number(st.clickTolerance) >= 2 ? Number(st.clickTolerance) : 14,
+    });
+    setStyleEditorLayerId(styleEditorLayerId === layer.id ? null : layer.id);
+  };
+
+  // Pick a color not used by any other layer's style (unique on the map canvas)
+  const handleAutoStyleColor = () => {
+    const used = new Set(
+      (allLayers || [])
+        .filter((l) => l.id !== styleEditorLayerId)
+        .map((l) => (l.style?.strokeColor || '').toLowerCase())
+        .filter(Boolean)
+    );
+    let pick = STYLE_AUTO_PALETTE.find((c) => !used.has(c.toLowerCase()));
+    if (!pick) {
+      // All palette colors taken — generate a vivid random hue
+      const hue = Math.floor(Math.random() * 360);
+      pick = `hsl(${hue}, 75%, 45%)`;
+    }
+    setStyleForm((prev) => ({ ...prev, color: pick }));
+  };
+
+  const handleSaveLayerStyle = async (layer) => {
+    try {
+      setSavingStyleLayerId(layer.id);
+      const newStyle = {
+        ...(layer.style || {}),
+        strokeColor: styleForm.color,
+        strokeWidth: Number(styleForm.width),
+        clickTolerance: Number(styleForm.clickTolerance),
+      };
+      await layersAPI.update(layer.id, { style: newStyle });
+      setAllLayers((prev) =>
+        prev.map((l) => (l.id === layer.id ? { ...l, style: newStyle } : l))
+      );
+      setMessage({
+        type: 'success',
+        text: `'${layer.name}' तहको रङ / मोटाइ / क्लिक दूरी सेभ भयो (Style saved)`,
+      });
+      setStyleEditorLayerId(null);
+      if (onLayerUpdate) onLayerUpdate();
+    } catch (err) {
+      setMessage({
+        type: 'error',
+        text: err.response?.data?.detail || 'तहको स्टाइल सेभ गर्न सकिएन',
+      });
+    } finally {
+      setSavingStyleLayerId(null);
     }
   };
 
@@ -1720,6 +1786,22 @@ export default function AdminPanel({
                             <Magnet className={`w-3.5 h-3.5 ${layer.allow_snapping !== false ? 'text-emerald-700' : 'text-slate-400'}`} />
                           )}
                         </button>
+                        {/* Admin Style Editor: color / thickness / click proximity */}
+                        <button
+                          type="button"
+                          onClick={() => handleOpenStyleEditor(layer)}
+                          className={`p-1.5 rounded transition-colors ${
+                            styleEditorLayerId === layer.id
+                              ? 'text-gov-blue-800 bg-gov-blue-100'
+                              : 'text-gov-blue-800 hover:bg-gov-blue-50'
+                          }`}
+                          title="तहको रङ, मोटाइ र क्लिक दूरी मिलाउनुहोस् (Layer Style: Color / Thickness / Click Proximity)"
+                        >
+                          <span
+                            className="block w-3.5 h-3.5 rounded-full border border-slate-400"
+                            style={{ backgroundColor: layer.style?.strokeColor || '#94a3b8' }}
+                          />
+                        </button>
                         {onOpenLinkLayers && (
                           <button
                             type="button"
@@ -1834,6 +1916,109 @@ export default function AdminPanel({
                         </span>
                       )}
                     </div>
+
+                    {/* Style Editor: color / thickness / click proximity (GIS Admin) */}
+                    {styleEditorLayerId === layer.id && (
+                      <div className="mt-2 rounded-lg border border-gov-blue-200 bg-gov-blue-50/60 p-3 space-y-2.5 animate-slide-up">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] font-bold text-gov-blue-900 font-nepali flex items-center gap-1.5">
+                            <Palette className="w-3.5 h-3.5" />
+                            तह स्टाइल (Layer Style)
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setStyleEditorLayerId(null)}
+                            className="p-1 text-slate-400 hover:text-slate-600 rounded"
+                            title="बन्द गर्नुहोस्"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+
+                        {/* Color */}
+                        <div className="flex items-center gap-2">
+                          <label className="text-[11px] font-bold text-slate-700 font-nepali w-24 shrink-0">
+                            रङ (Color)
+                          </label>
+                          <input
+                            type="color"
+                            value={/^#[0-9a-fA-F]{6}$/.test(styleForm.color) ? styleForm.color : '#3b82f6'}
+                            onChange={(e) => setStyleForm((p) => ({ ...p, color: e.target.value }))}
+                            className="w-9 h-8 rounded border border-slate-300 cursor-pointer bg-white p-0.5"
+                          />
+                          <input
+                            type="text"
+                            value={styleForm.color}
+                            onChange={(e) => setStyleForm((p) => ({ ...p, color: e.target.value }))}
+                            className="gov-input text-xs py-1 w-24 font-mono"
+                            placeholder="#3b82f6"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleAutoStyleColor}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white border border-gov-blue-300 text-gov-blue-800 text-[10px] font-bold font-nepali hover:bg-gov-blue-100 transition-colors"
+                            title="नक्सामा प्रयोग नभएको अद्वितीय रङ स्वतः छान्नुहोस्"
+                          >
+                            <Wand2 className="w-3 h-3" />
+                            स्वतः अद्वितीय रङ
+                          </button>
+                        </div>
+
+                        {/* Thickness */}
+                        <div className="flex items-center gap-2">
+                          <label className="text-[11px] font-bold text-slate-700 font-nepali w-24 shrink-0">
+                            मोटाइ (Thickness)
+                          </label>
+                          <input
+                            type="range"
+                            min="1"
+                            max="10"
+                            step="0.5"
+                            value={styleForm.width}
+                            onChange={(e) => setStyleForm((p) => ({ ...p, width: Number(e.target.value) }))}
+                            className="flex-1 accent-gov-blue-700"
+                          />
+                          <span className="text-[11px] font-mono text-slate-600 w-8 text-right">
+                            {styleForm.width}px
+                          </span>
+                        </div>
+
+                        {/* Click proximity */}
+                        <div className="flex items-center gap-2">
+                          <label className="text-[11px] font-bold text-slate-700 font-nepali w-24 shrink-0 flex items-center gap-1">
+                            <MousePointerClick className="w-3 h-3" />
+                            क्लिक दूरी
+                          </label>
+                          <input
+                            type="number"
+                            min="2"
+                            max="60"
+                            value={styleForm.clickTolerance}
+                            onChange={(e) => setStyleForm((p) => ({ ...p, clickTolerance: Number(e.target.value) }))}
+                            className="gov-input text-xs py-1 w-20"
+                          />
+                          <span className="text-[10px] text-slate-500 font-nepali">
+                            पिक्सेल — जति ठूलो, त्यति सजिलो क्लिक (2–60)
+                          </span>
+                        </div>
+
+                        <div className="flex justify-end pt-1">
+                          <button
+                            type="button"
+                            disabled={savingStyleLayerId === layer.id}
+                            onClick={() => handleSaveLayerStyle(layer)}
+                            className="btn-gov-primary text-xs py-1.5 px-3 flex items-center gap-1.5"
+                          >
+                            {savingStyleLayerId === layer.id ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Save className="w-3.5 h-3.5" />
+                            )}
+                            <span className="font-nepali">सेभ गर्नुहोस्</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}

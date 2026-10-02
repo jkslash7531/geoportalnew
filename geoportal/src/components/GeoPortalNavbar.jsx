@@ -50,7 +50,10 @@ export default function GeoPortalNavbar({
             
             <div className="leading-tight min-w-0">
               <div className="text-[9px] sm:text-[11px] font-semibold text-gov-red-700 font-nepali truncate">
-                काठमाडौँ महानगरपालिका • नगर कार्यपालिकाको कार्यालय
+                काठमाडौँ महानगरपालिका
+              </div>
+              <div className="text-[9px] sm:text-[10px] font-medium text-gov-red-700/80 font-nepali truncate">
+                नगर कार्यपालिकाको कार्यालय, बागमती प्रदेश
               </div>
               <div className="flex items-center gap-1.5">
                 <h1 className="text-sm sm:text-lg md:text-xl font-bold text-gov-blue-800 tracking-tight font-nepali truncate">
@@ -61,7 +64,7 @@ export default function GeoPortalNavbar({
                 </span>
               </div>
               <div className="hidden md:inline-block text-[10px] md:text-[11px] font-bold text-gov-blue-900 uppercase tracking-wider bg-gov-blue-50/90 px-2 py-0.5 rounded mt-0.5 border border-gov-blue-200">
-                एकीकृत भू-स्थानिक खुला पोर्टल (KMC Public GeoPortal)
+                एकीकृत नगर सूचना प्रणाली तथा खुला भू-स्थानिक पोर्टल (KMC Public GeoPortal)
               </div>
             </div>
           </div>

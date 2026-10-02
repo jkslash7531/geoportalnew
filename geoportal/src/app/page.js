@@ -27,8 +27,8 @@ const DENIED_COPY = {
     ne: 'प्रोक्सी जडान अनुमति छैन।',
   },
   outside_nepal: {
-    en: 'The Geo World of KMC is available to viewers inside Nepal only.',
-    ne: 'केएमसीको जियो वर्ल्ड नेपालभित्रका दर्शकहरूका लागि मात्र उपलब्ध छ।',
+    en: 'The Geo Sansar of KMC is available to viewers inside Nepal only.',
+    ne: 'केएमसीको जियो संसार नेपालभित्रका दर्शकहरूका लागि मात्र उपलब्ध छ।',
   },
   vpn_or_datacenter: {
     en: 'VPN, proxy or datacenter connections are not permitted. Please disconnect your VPN and try again.',
@@ -168,16 +168,16 @@ function LandingInner() {
                 <div className="text-[10px] sm:text-xs font-semibold text-gov-red-700 font-nepali truncate">
                   काठमाडौँ महानगरपालिका
                 </div>
+                <div className="text-[10px] sm:text-[11px] font-medium text-gov-red-700/80 font-nepali truncate">
+                  नगर कार्यपालिकाको कार्यालय, बागमती प्रदेश
+                </div>
                 <div className="text-sm sm:text-base font-bold text-gov-blue-900 font-nepali truncate">
-                  एकीकृत खुला भू-स्थानिक पोर्टल
+                  एकीकृत नगर सूचना प्रणाली तथा खुला भू-स्थानिक पोर्टल
                 </div>
               </div>
             </div>
             <div className="hidden sm:flex items-center gap-2 shrink-0">
               <NepalFlag className="w-6 h-8" />
-              <span className="text-[11px] font-bold text-gov-blue-900 uppercase tracking-wider bg-gov-blue-50 px-2.5 py-1 rounded-full border border-gov-blue-200">
-                Official GeoPortal
-              </span>
             </div>
           </div>
         </header>
@@ -192,7 +192,7 @@ function LandingInner() {
           </div>
 
           <h1 className="font-nepali font-extrabold text-white text-3xl sm:text-5xl lg:text-6xl leading-tight drop-shadow-lg max-w-4xl">
-            काठमाडौँको <span className="text-sky-300">जियो वर्ल्ड</span>मा
+            काठमाडौँको <span className="text-sky-300">जियो संसार</span>मा
             <br className="hidden sm:block" /> स्वागत छ
           </h1>
           <p className="mt-3 text-sky-100/95 text-base sm:text-xl font-medium max-w-2xl">
@@ -273,7 +273,7 @@ function LandingInner() {
                   : 'Enter the Geo World of KMC'}
                 {!checking && (
                   <span className="block text-xs font-semibold text-gov-blue-600 font-nepali mt-0.5">
-                    केएमसीको जियो वर्ल्डमा प्रवेश गर्नुहोस्
+                    केएमसीको जियो संसारमा प्रवेश गर्नुहोस्
                   </span>
                 )}
               </span>

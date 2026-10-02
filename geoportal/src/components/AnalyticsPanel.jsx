@@ -99,7 +99,7 @@ export default function AnalyticsPanel({
           </div>
           <div className="truncate">
             <h2 className="text-xs font-bold font-nepali text-white truncate">
-              {layerName || 'विश्लेषणात्मक इन्फोग्राफिक्स'}
+              {data?.layer_name || layerName || 'विश्लेषणात्मक इन्फोग्राफिक्स'}
             </h2>
             <span className="text-[10px] text-gov-gold-300 font-medium">
               {data?.geometry_type || 'Vector Infographics'}

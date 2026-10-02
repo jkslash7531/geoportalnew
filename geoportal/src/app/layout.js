@@ -1,8 +1,8 @@
 import './globals.css';
 
 export const metadata = {
-  title: 'काठमाडौँ महानगरपालिका | एकीकृत खुला भू-स्थानिक पोर्टल (KMC Public GeoPortal)',
-  description: 'काठमाडौँ महानगरपालिकाको आधिकारिक सार्वजनिक खुला भू-स्थानिक पोर्टल तथा नक्साङ्कन ड्यासबोर्ड',
+  title: 'काठमाडौँ महानगरपालिका | एकीकृत नगर सूचना प्रणाली तथा खुला भू-स्थानिक पोर्टल (KMC Public GeoPortal)',
+  description: 'काठमाडौँ महानगरपालिकाको आधिकारिक एकीकृत नगर सूचना प्रणाली तथा खुला भू-स्थानिक पोर्टल',
   keywords: 'KMC, Kathmandu, GeoPortal, GIS, WebGIS, PostGIS, Nepal Open Data, Spatial Infrastructure',
   viewport: 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover',
 };
