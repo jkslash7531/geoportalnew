@@ -330,7 +330,7 @@ async def delete_mbtiles_pkg(
     if not package:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MBTiles package not found")
 
-    package.deleted_at = datetime.now(timezone.utc)
+    package.deleted_at = datetime.now(timezone.utc).replace(tzinfo=None)
     await regenerate_tileserver_config(db)
 
     return MessageResponse(message=f"MBTiles '{package.name}' moved to recycle bin")

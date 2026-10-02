@@ -443,7 +443,7 @@ async def delete_layer(
     if not layer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")
 
-    layer.deleted_at = datetime.now(timezone.utc)
+    layer.deleted_at = datetime.now(timezone.utc).replace(tzinfo=None)
     await invalidate_layer_cache(layer.id)
     return MessageResponse(message=f"Layer '{layer.name}' moved to recycle bin")
 
