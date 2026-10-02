@@ -210,7 +210,7 @@ async def create_feature(
         )
 
     # Verify layer exists and is editable
-    layer_result = await db.execute(select(VectorLayer).where(VectorLayer.id == body.layer_id))
+    layer_result = await db.execute(select(VectorLayer).where(VectorLayer.id == body.layer_id, VectorLayer.deleted_at.is_(None)))
     layer = layer_result.scalar_one_or_none()
     if not layer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")
@@ -470,7 +470,7 @@ async def update_feature(
         )
 
     # Check layer editability
-    layer_result = await db.execute(select(VectorLayer).where(VectorLayer.id == feature.layer_id))
+    layer_result = await db.execute(select(VectorLayer).where(VectorLayer.id == feature.layer_id, VectorLayer.deleted_at.is_(None)))
     layer = layer_result.scalar_one_or_none()
     if current_user.role == UserRole.DataCollector and layer and not layer.editable_by_collectors:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Layer not editable by DataCollectors")
@@ -630,7 +630,7 @@ async def delete_feature(
             detail="Access denied. This feature belongs to a layer outside your assigned projects.",
         )
 
-    layer_result = await db.execute(select(VectorLayer).where(VectorLayer.id == feature.layer_id))
+    layer_result = await db.execute(select(VectorLayer).where(VectorLayer.id == feature.layer_id, VectorLayer.deleted_at.is_(None)))
     layer = layer_result.scalar_one_or_none()
     if current_user.role == UserRole.DataCollector and layer and not layer.editable_by_collectors:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Layer not editable by DataCollectors")
@@ -727,7 +727,7 @@ async def split_feature(
             detail="Access denied. This feature belongs to a layer outside your assigned projects.",
         )
 
-    layer_result = await db.execute(select(VectorLayer).where(VectorLayer.id == feature.layer_id))
+    layer_result = await db.execute(select(VectorLayer).where(VectorLayer.id == feature.layer_id, VectorLayer.deleted_at.is_(None)))
     layer = layer_result.scalar_one_or_none()
     if current_user.role == UserRole.DataCollector and layer and not layer.editable_by_collectors:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Layer not editable by DataCollectors")
@@ -824,7 +824,7 @@ async def merge_features(
             detail="Access denied. This layer is not linked to any of your assigned projects.",
         )
 
-    layer_result = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id))
+    layer_result = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id, VectorLayer.deleted_at.is_(None)))
     layer = layer_result.scalar_one_or_none()
     if not layer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")

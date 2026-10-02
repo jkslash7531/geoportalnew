@@ -6,6 +6,7 @@ MBTiles upload, listing, download, XYZ tile serving, and TileJSON endpoints.
 import os
 import re
 import sqlite3
+from datetime import datetime, timezone
 from typing import Optional, List
 from xml.sax.saxutils import escape as xml_escape
 
@@ -127,9 +128,9 @@ async def list_mbtiles(
                 MBTilesPackage.id.in_(assigned_ids) if assigned_ids else False,
                 and_(MBTilesPackage.project_id.in_(target_pids), MBTilesPackage.is_global == False),
             )
-        ).order_by(MBTilesPackage.created_at.desc())
+        ).where(MBTilesPackage.deleted_at.is_(None)).order_by(MBTilesPackage.created_at.desc())
     else:
-        query = select(MBTilesPackage)
+        query = select(MBTilesPackage).where(MBTilesPackage.deleted_at.is_(None))
         if project_id is not None:
             assigned_result = await db.execute(
                 select(ProjectMBTilesAssignment.mbtiles_id)
@@ -157,6 +158,7 @@ async def list_mbtiles(
             min_zoom=pkg.min_zoom, max_zoom=pkg.max_zoom,
             file_size=pkg.file_size, is_global=pkg.is_global, project_id=pkg.project_id,
             project_name=proj_map.get(pkg.project_id) if pkg.project_id else None,
+            deleted_at=pkg.deleted_at,
             created_at=pkg.created_at,
         )
         for pkg in packages
@@ -190,7 +192,7 @@ async def list_project_mbtiles(
             MBTilesPackage.id.in_(assigned_ids) if assigned_ids else False,
             and_(MBTilesPackage.project_id == project_id, MBTilesPackage.is_global == False),
         )
-    )
+    ).where(MBTilesPackage.deleted_at.is_(None))
 
     result = await db.execute(query)
     packages = result.scalars().all()
@@ -203,6 +205,7 @@ async def list_project_mbtiles(
             min_zoom=pkg.min_zoom, max_zoom=pkg.max_zoom,
             file_size=pkg.file_size, is_global=pkg.is_global, project_id=pkg.project_id,
             project_name=proj_map.get(pkg.project_id) if pkg.project_id else None,
+            deleted_at=pkg.deleted_at,
             created_at=pkg.created_at,
         )
         for pkg in packages
@@ -265,17 +268,91 @@ async def upload_project_mbtiles(
         )
 
 
+@router.get("/tiles/deleted", response_model=List[MBTilesResponse])
+async def list_deleted_mbtiles(
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_role(UserRole.GisAdmin)),
+):
+    """Recycle bin: list soft-deleted MBTiles packages (GisAdmin only)."""
+    result = await db.execute(
+        select(MBTilesPackage)
+        .where(MBTilesPackage.deleted_at.is_not(None))
+        .order_by(MBTilesPackage.deleted_at.desc())
+    )
+    packages = result.scalars().all()
+    return [
+        MBTilesResponse(
+            id=pkg.id, name=pkg.name, filename=pkg.filename, description=pkg.description,
+            bounds=pkg.bounds, center=pkg.center,
+            min_zoom=pkg.min_zoom, max_zoom=pkg.max_zoom,
+            file_size=pkg.file_size, is_global=pkg.is_global, project_id=pkg.project_id,
+            deleted_at=pkg.deleted_at,
+            created_at=pkg.created_at,
+        )
+        for pkg in packages
+    ]
+
+
+@router.post("/tiles/{tile_id}/restore", response_model=MessageResponse)
+async def restore_mbtiles_pkg(
+    tile_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_role(UserRole.GisAdmin)),
+):
+    """Restore a soft-deleted MBTiles package from the recycle bin (GisAdmin only)."""
+    result = await db.execute(select(MBTilesPackage).where(MBTilesPackage.id == tile_id, MBTilesPackage.deleted_at.is_(None)))
+    package = result.scalar_one_or_none()
+    if not package:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MBTiles package not found")
+    if package.deleted_at is None:
+        return MessageResponse(message=f"MBTiles '{package.name}' is not deleted")
+    package.deleted_at = None
+    await regenerate_tileserver_config(db)
+    return MessageResponse(message=f"MBTiles '{package.name}' restored from recycle bin")
+
+
 @router.delete("/tiles/{tile_id}", response_model=MessageResponse)
 async def delete_mbtiles_pkg(
     tile_id: int,
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_role(UserRole.GisAdmin)),
 ):
-    """Delete an MBTiles package (GisAdmin only)."""
-    result = await db.execute(select(MBTilesPackage).where(MBTilesPackage.id == tile_id))
+    """Soft-delete an MBTiles package → moves it to the recycle bin (GisAdmin only).
+    The .mbtiles file is KEPT on disk so the package can be restored.
+    Permanent deletion happens via DELETE /tiles/{tile_id}/permanent."""
+    result = await db.execute(
+        select(MBTilesPackage).where(
+            MBTilesPackage.id == tile_id,
+            MBTilesPackage.deleted_at.is_(None),
+        )
+    )
     package = result.scalar_one_or_none()
     if not package:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MBTiles package not found")
+
+    package.deleted_at = datetime.now(timezone.utc)
+    await regenerate_tileserver_config(db)
+
+    return MessageResponse(message=f"MBTiles '{package.name}' moved to recycle bin")
+
+
+@router.delete("/tiles/{tile_id}/permanent", response_model=MessageResponse)
+async def permanent_delete_mbtiles_pkg(
+    tile_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_role(UserRole.GisAdmin)),
+):
+    """Permanently delete an MBTiles package and its file (GisAdmin only).
+    Only allowed from the recycle bin — this cannot be undone."""
+    result = await db.execute(select(MBTilesPackage).where(MBTilesPackage.id == tile_id, MBTilesPackage.deleted_at.is_(None)))
+    package = result.scalar_one_or_none()
+    if not package:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MBTiles package not found")
+    if package.deleted_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Package must be moved to the recycle bin first",
+        )
 
     await delete_mbtiles_file(package.filename)
     await db.delete(package)
@@ -283,7 +360,7 @@ async def delete_mbtiles_pkg(
 
     await regenerate_tileserver_config(db)
 
-    return MessageResponse(message=f"MBTiles '{package.name}' deleted")
+    return MessageResponse(message=f"MBTiles '{package.name}' permanently deleted")
 
 
 @router.get("/tiles/{tile_id}/download")
@@ -297,7 +374,7 @@ async def download_mbtiles(
     Download raw MBTiles (.mbtiles) package file.
     Exclusively available to GisAdmin.
     """
-    result = await db.execute(select(MBTilesPackage).where(MBTilesPackage.id == tile_id))
+    result = await db.execute(select(MBTilesPackage).where(MBTilesPackage.id == tile_id, MBTilesPackage.deleted_at.is_(None)))
     package = result.scalar_one_or_none()
     if not package:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MBTiles package not found")
@@ -360,7 +437,7 @@ async def get_mbtile_xyz(
         except ValueError:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid y coordinate")
 
-    result = await db.execute(select(MBTilesPackage).where(MBTilesPackage.id == tile_id))
+    result = await db.execute(select(MBTilesPackage).where(MBTilesPackage.id == tile_id, MBTilesPackage.deleted_at.is_(None)))
     package = result.scalar_one_or_none()
     if not package:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tile package not found")
@@ -439,7 +516,7 @@ async def get_tilejson(
     db: AsyncSession = Depends(get_db),
 ):
     """Return TileJSON 2.2.0 metadata for an MBTiles package."""
-    result = await db.execute(select(MBTilesPackage).where(MBTilesPackage.id == tile_id))
+    result = await db.execute(select(MBTilesPackage).where(MBTilesPackage.id == tile_id, MBTilesPackage.deleted_at.is_(None)))
     package = result.scalar_one_or_none()
     if not package:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tile package not found")
@@ -622,7 +699,7 @@ async def get_single_wmts(
     db: AsyncSession = Depends(get_db),
 ):
     """Return OGC WMTS 1.0.0 Capabilities XML for a specific MBTiles package."""
-    result = await db.execute(select(MBTilesPackage).where(MBTilesPackage.id == tile_id))
+    result = await db.execute(select(MBTilesPackage).where(MBTilesPackage.id == tile_id, MBTilesPackage.deleted_at.is_(None)))
     package = result.scalar_one_or_none()
     if not package:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tile package not found")
@@ -645,7 +722,7 @@ async def get_qgis_gdal_wms(
     Download a ready-to-use GDAL WMS XML file with exact Kathmandu bounding box.
     Users can simply drag this file into QGIS to open the raster with exact extent!
     """
-    result = await db.execute(select(MBTilesPackage).where(MBTilesPackage.id == tile_id))
+    result = await db.execute(select(MBTilesPackage).where(MBTilesPackage.id == tile_id, MBTilesPackage.deleted_at.is_(None)))
     package = result.scalar_one_or_none()
     if not package:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tile package not found")

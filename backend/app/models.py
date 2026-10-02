@@ -213,6 +213,8 @@ class VectorLayer(Base):
     field_permissions = Column(JSON, default=dict)
     dashboard_config = Column(JSON, default=dict)
     metadata_info = Column(JSON, default=dict)
+    # Soft delete (recycle bin): set when GIS Admin deletes; NULL = active
+    deleted_at = Column(DateTime, nullable=True, index=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
@@ -297,6 +299,9 @@ class MBTilesPackage(Base):
     is_global = Column(Boolean, default=False, nullable=False, index=True)
     project_id = Column(Integer, ForeignKey("survey_projects.id", ondelete="CASCADE"), nullable=True, index=True)
     uploaded_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    # Soft delete (recycle bin): set when GIS Admin deletes; NULL = active.
+    # The .mbtiles file is kept on disk until permanent deletion.
+    deleted_at = Column(DateTime, nullable=True, index=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
     # Relationships

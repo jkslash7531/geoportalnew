@@ -115,7 +115,7 @@ async def get_geoportal_catalog(
             bounds_map[r[0]] = [float(r[1]), float(r[2]), float(r[3]), float(r[4])]
 
     # 2. Fetch Raster MBTiles
-    mbt_query = select(MBTilesPackage).order_by(MBTilesPackage.category, MBTilesPackage.display_order, MBTilesPackage.name)
+    mbt_query = select(MBTilesPackage).where(MBTilesPackage.deleted_at.is_(None)).order_by(MBTilesPackage.category, MBTilesPackage.display_order, MBTilesPackage.name)
     if not is_admin:
         mbt_query = mbt_query.where(MBTilesPackage.published_in_geoportal == True)
     
@@ -243,7 +243,7 @@ async def get_feature_detail(
     """
     Get full feature detail with field-level permissions strictly applied.
     """
-    res_l = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id))
+    res_l = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id, VectorLayer.deleted_at.is_(None)))
     layer = res_l.scalar_one_or_none()
     if not layer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")
@@ -290,7 +290,7 @@ async def update_layer_geoportal_config(
     Configures category, publication, default visibility, styles,
     role-based layer permissions, and field-level permissions.
     """
-    res = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id))
+    res = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id, VectorLayer.deleted_at.is_(None)))
     layer = res.scalar_one_or_none()
     if not layer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")
@@ -334,7 +334,7 @@ async def update_mbtiles_geoportal_config(
     admin: User = Depends(require_role(UserRole.GisAdmin, UserRole.SuperAdmin)),
 ):
     """Configure raster package presentation in GeoPortal (GisAdmin & SuperAdmin only)."""
-    res = await db.execute(select(MBTilesPackage).where(MBTilesPackage.id == mbtiles_id))
+    res = await db.execute(select(MBTilesPackage).where(MBTilesPackage.id == mbtiles_id, MBTilesPackage.deleted_at.is_(None)))
     pkg = res.scalar_one_or_none()
     if not pkg:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MBTiles package not found")
@@ -370,7 +370,7 @@ async def export_geoportal_layer(
     _geo_entry: bool = Depends(require_geo_entry),
 ):
     """Export layer features respecting role permissions and field-level security."""
-    res_l = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id))
+    res_l = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id, VectorLayer.deleted_at.is_(None)))
     layer = res_l.scalar_one_or_none()
     if not layer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")
@@ -472,7 +472,7 @@ async def get_landing_stats(db: AsyncSession = Depends(get_db)):
         pass
 
     # Published vector layers (visible to anonymous viewers)
-    vl_query = select(VectorLayer).where(VectorLayer.published_in_geoportal == True)
+    vl_query = select(VectorLayer).where(VectorLayer.published_in_geoportal == True, VectorLayer.deleted_at.is_(None))
     vl_res = await db.execute(vl_query)
     pub_layers = vl_res.scalars().all()
 
@@ -495,7 +495,7 @@ async def get_landing_stats(db: AsyncSession = Depends(get_db)):
             geometry_types[gt] = geometry_types.get(gt, 0) + 1
 
     mb_res = await db.execute(
-        select(func.count(MBTilesPackage.id)).where(MBTilesPackage.published_in_geoportal == True)
+        select(func.count(MBTilesPackage.id)).where(MBTilesPackage.published_in_geoportal == True, MBTilesPackage.deleted_at.is_(None))
     )
     raster_packages = mb_res.scalar() or 0
 

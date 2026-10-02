@@ -103,7 +103,7 @@ async def get_vector_tile(
         pass
 
     # 2. Fetch layer
-    res = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id))
+    res = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id, VectorLayer.deleted_at.is_(None)))
     layer = res.scalar_one_or_none()
     if not layer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")
@@ -221,7 +221,7 @@ async def get_tilejson(
     _geo_entry: bool = Depends(require_geo_entry),
 ):
     """Return TileJSON 2.2.0 metadata for vector tile client integration."""
-    res = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id))
+    res = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id, VectorLayer.deleted_at.is_(None)))
     layer = res.scalar_one_or_none()
     if not layer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")

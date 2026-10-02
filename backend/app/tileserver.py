@@ -203,7 +203,9 @@ async def regenerate_tileserver_config(db: AsyncSession) -> dict:
     Returns:
         The generated config dict
     """
-    result = await db.execute(select(MBTilesPackage))
+    result = await db.execute(
+        select(MBTilesPackage).where(MBTilesPackage.deleted_at.is_(None))
+    )
     packages = result.scalars().all()
 
     data = {}

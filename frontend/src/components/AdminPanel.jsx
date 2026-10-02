@@ -10,7 +10,7 @@ import {
   UserCheck, UserX, Shield, FolderCheck, Download, FileDown, FileText,
   Radio, Navigation, Crosshair, Clock, Magnet, Sliders, Asterisk,
   ClipboardList, CheckSquare, ArrowUp, ArrowDown, Eye, EyeOff, Key, Hash, ListOrdered,
-  Palette, Wand2, MousePointerClick, Save,
+  Palette, Wand2, MousePointerClick, Save, RotateCcw, Recycle,
 } from 'lucide-react';
 import { useAuth } from '../lib/auth';
 import {
@@ -75,6 +75,13 @@ export default function AdminPanel({
   const [styleEditorLayerId, setStyleEditorLayerId] = useState(null); // layer card with style editor open
   const [styleForm, setStyleForm] = useState({ color: '#3b82f6', width: 3, clickTolerance: 14, hoverMinZoom: '' });
   const [savingStyleLayerId, setSavingStyleLayerId] = useState(null);
+  // Recycle bin (soft-deleted layers & rasters)
+  const [deletedLayers, setDeletedLayers] = useState([]);
+  const [deletedTiles, setDeletedTiles] = useState([]);
+  const [showRecycleBin, setShowRecycleBin] = useState(false);
+  const [recycleBinLoading, setRecycleBinLoading] = useState(false);
+  const [restoringId, setRestoringId] = useState(null);
+  const [permanentDeletingId, setPermanentDeletingId] = useState(null);
   const [fieldConfigModal, setFieldConfigModal] = useState(null); // { layer, activeTab, fields: [], creation_geometry_types: [], geometry_fields_config: {}, loading: false, saving: false }
   const [selectedQuestionnaireProject, setSelectedQuestionnaireProject] = useState(null);
   const [selectedRecordsProjectId, setSelectedRecordsProjectId] = useState(activeProject?.id || null);
@@ -260,6 +267,79 @@ export default function AdminPanel({
       });
     } finally {
       setTogglingSnappingLayerId(null);
+    }
+  };
+
+  // ---- Recycle Bin (soft-deleted layers & rasters) ----
+  const loadRecycleBin = async () => {
+    try {
+      setRecycleBinLoading(true);
+      const [lr, tr] = await Promise.all([
+        layersAPI.getDeleted().catch(() => ({ data: [] })),
+        tilesAPI.getDeleted().catch(() => ({ data: [] })),
+      ]);
+      setDeletedLayers(lr.data || []);
+      setDeletedTiles(tr.data || []);
+    } finally {
+      setRecycleBinLoading(false);
+    }
+  };
+
+  const handleRestoreLayer = async (layer) => {
+    try {
+      setRestoringId(`layer-${layer.id}`);
+      await layersAPI.restore(layer.id);
+      setMessage({ type: 'success', text: `'${layer.name}' तह पुनर्स्थापना गरियो (Restored)` });
+      loadData();
+      loadRecycleBin();
+      if (onLayerUpdate) onLayerUpdate();
+    } catch (err) {
+      setMessage({ type: 'error', text: err.response?.data?.detail || 'पुनर्स्थापना गर्न सकिएन' });
+    } finally {
+      setRestoringId(null);
+    }
+  };
+
+  const handlePermanentDeleteLayer = async (layer) => {
+    if (!window.confirm(`⚠️ के तपाईं '${layer.name}' तह सधैंका लागि मेटाउन निश्चित हुनुहुन्छ?\n\nयसले तहका सबै फिचरहरू स्थायी रूपमा मेटाउनेछ। यो कार्य फिर्ता गर्न सकिँदैन!`)) return;
+    try {
+      setPermanentDeletingId(`layer-${layer.id}`);
+      await layersAPI.permanentDelete(layer.id);
+      setMessage({ type: 'success', text: `'${layer.name}' तह स्थायी रूपमा मेटाइयो` });
+      loadRecycleBin();
+      if (onLayerUpdate) onLayerUpdate();
+    } catch (err) {
+      setMessage({ type: 'error', text: err.response?.data?.detail || 'मेटाउन सकिएन' });
+    } finally {
+      setPermanentDeletingId(null);
+    }
+  };
+
+  const handleRestoreTile = async (tile) => {
+    try {
+      setRestoringId(`tile-${tile.id}`);
+      await tilesAPI.restore(tile.id);
+      setMessage({ type: 'success', text: `'${tile.name}' इमेज्री पुनर्स्थापना गरियो (Restored)` });
+      loadData();
+      loadRecycleBin();
+    } catch (err) {
+      setMessage({ type: 'error', text: err.response?.data?.detail || 'पुनर्स्थापना गर्न सकिएन' });
+    } finally {
+      setRestoringId(null);
+    }
+  };
+
+  const handlePermanentDeleteTile = async (tile) => {
+    if (!window.confirm(`⚠️ के तपाईं '${tile.name}' इमेज्री सधैंका लागि मेटाउन निश्चित हुनुहुन्छ?\n\nयसले .mbtiles फाइल स्थायी रूपमा मेटाउनेछ। यो कार्य फिर्ता गर्न सकिँदैन!`)) return;
+    try {
+      setPermanentDeletingId(`tile-${tile.id}`);
+      await tilesAPI.permanentDelete(tile.id);
+      setMessage({ type: 'success', text: `'${tile.name}' इमेज्री स्थायी रूपमा मेटाइयो` });
+      loadRecycleBin();
+    } catch (err) {
+      setMessage({ type: 'error', text: err.response?.data?.detail || 'मेटाउन सकिएन' });
+    } finally {
+      setPermanentDeletingId(null);
     }
   };
 
@@ -1848,13 +1928,14 @@ export default function AdminPanel({
                         <button
                           type="button"
                           onClick={async () => {
-                            if (window.confirm(`के तपाईं '${layer.name}' तह मेटाउन निश्चित हुनुहुन्छ?`)) {
+                            if (window.confirm(`के तपाईं '${layer.name}' तह रिसाइकल बिनमा सार्न निश्चित हुनुहुन्छ? (तहका सबै फिचरहरू सुरक्षित रहनेछन् र पछि पुनर्स्थापना गर्न सकिनेछ)`)) {
                               await layersAPI.delete(layer.id);
                               loadData();
+                              loadRecycleBin();
                             }
                           }}
                           className="p-1.5 text-gov-red-700 hover:bg-gov-red-50 rounded transition-colors"
-                          title="मेटाउनुहोस्"
+                          title="रिसाइकल बिनमा सार्नुहोस् (Soft delete — पुनर्स्थापना गर्न सकिने)"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -2047,6 +2128,85 @@ export default function AdminPanel({
                   </div>
                 );
               })}
+            </div>
+
+            {/* Recycle Bin — soft-deleted vector layers */}
+            <div className="mt-3 border border-slate-200 rounded-lg overflow-hidden bg-white shadow-xs">
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !showRecycleBin;
+                  setShowRecycleBin(next);
+                  if (next) loadRecycleBin();
+                }}
+                className="w-full px-3 py-2 bg-slate-100/90 hover:bg-slate-200/80 flex items-center justify-between text-left transition-colors"
+              >
+                <span className="flex items-center gap-2 text-xs font-bold text-slate-800 font-nepali">
+                  <Recycle className="w-3.5 h-3.5 text-slate-500" />
+                  रिसाइकल बिन (Recycle Bin)
+                </span>
+                <span className="flex items-center gap-2">
+                  {deletedLayers.length > 0 && (
+                    <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-100 text-amber-800">
+                      {deletedLayers.length}
+                    </span>
+                  )}
+                  {showRecycleBin ? <ChevronUp className="w-3.5 h-3.5 text-slate-400" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400" />}
+                </span>
+              </button>
+              {showRecycleBin && (
+                <div className="p-2 space-y-1.5 max-h-64 overflow-y-auto">
+                  {recycleBinLoading ? (
+                    <div className="p-4 text-center text-xs text-slate-500 font-nepali flex items-center justify-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin" /> लोड हुँदैछ…
+                    </div>
+                  ) : deletedLayers.length === 0 ? (
+                    <div className="p-4 text-center text-xs text-slate-400 font-nepali">
+                      रिसाइकल बिन खाली छ (No deleted layers)
+                    </div>
+                  ) : (
+                    deletedLayers.map((layer) => (
+                      <div key={layer.id} className="flex items-center justify-between gap-2 bg-amber-50/60 border border-amber-200/60 rounded-lg px-2.5 py-2">
+                        <div className="min-w-0">
+                          <div className="text-xs font-bold text-slate-800 font-nepali truncate">{layer.name}</div>
+                          <div className="text-[10px] text-slate-500">
+                            {layer.geometry_type} · {layer.feature_count ?? 0} फिचर · मेटिएको:{' '}
+                            {layer.deleted_at ? new Date(layer.deleted_at).toLocaleString() : '—'}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            disabled={restoringId === `layer-${layer.id}`}
+                            onClick={() => handleRestoreLayer(layer)}
+                            className="p-1.5 text-emerald-700 hover:bg-emerald-100 rounded transition-colors"
+                            title="पुनर्स्थापना गर्नुहोस् (Restore)"
+                          >
+                            {restoringId === `layer-${layer.id}` ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <RotateCcw className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={permanentDeletingId === `layer-${layer.id}`}
+                            onClick={() => handlePermanentDeleteLayer(layer)}
+                            className="p-1.5 text-gov-red-700 hover:bg-gov-red-100 rounded transition-colors"
+                            title="सधैंका लागि मेटाउनुहोस् (Delete forever — cannot be undone)"
+                          >
+                            {permanentDeletingId === `layer-${layer.id}` ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Trash2 className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -2266,13 +2426,14 @@ export default function AdminPanel({
                         <button
                           type="button"
                           onClick={async () => {
-                            if (window.confirm(`के तपाईं '${tile.name}' इमेज्री मेटाउन निश्चित हुनुहुन्छ?`)) {
+                            if (window.confirm(`के तपाईं '${tile.name}' इमेज्री रिसाइकल बिनमा सार्न निश्चित हुनुहुन्छ? (फाइल सुरक्षित रहनेछ र पछि पुनर्स्थापना गर्न सकिनेछ)`)) {
                               await tilesAPI.delete(tile.id);
                               loadData();
+                              loadRecycleBin();
                             }
                           }}
                           className="p-1.5 text-gov-red-700 hover:bg-gov-red-50 rounded transition-colors"
-                          title="मेटाउनुहोस्"
+                          title="रिसाइकल बिनमा सार्नुहोस् (Soft delete — पुनर्स्थापना गर्न सकिने)"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -2632,6 +2793,85 @@ export default function AdminPanel({
                     </div>
                   );
                 })}
+              </div>
+
+              {/* Recycle Bin — soft-deleted raster packages */}
+              <div className="mt-2 border border-slate-200 rounded-lg overflow-hidden bg-white shadow-xs">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !showRecycleBin;
+                    setShowRecycleBin(next);
+                    if (next) loadRecycleBin();
+                  }}
+                  className="w-full px-3 py-2 bg-slate-100/90 hover:bg-slate-200/80 flex items-center justify-between text-left transition-colors"
+                >
+                  <span className="flex items-center gap-2 text-xs font-bold text-slate-800 font-nepali">
+                    <Recycle className="w-3.5 h-3.5 text-slate-500" />
+                    रिसाइकल बिन (Recycle Bin)
+                  </span>
+                  <span className="flex items-center gap-2">
+                    {deletedTiles.length > 0 && (
+                      <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-100 text-amber-800">
+                        {deletedTiles.length}
+                      </span>
+                    )}
+                    {showRecycleBin ? <ChevronUp className="w-3.5 h-3.5 text-slate-400" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400" />}
+                  </span>
+                </button>
+                {showRecycleBin && (
+                  <div className="p-2 space-y-1.5 max-h-64 overflow-y-auto">
+                    {recycleBinLoading ? (
+                      <div className="p-4 text-center text-xs text-slate-500 font-nepali flex items-center justify-center gap-2">
+                        <Loader2 className="w-4 h-4 animate-spin" /> लोड हुँदैछ…
+                      </div>
+                    ) : deletedTiles.length === 0 ? (
+                      <div className="p-4 text-center text-xs text-slate-400 font-nepali">
+                        रिसाइकल बिन खाली छ (No deleted rasters)
+                      </div>
+                    ) : (
+                      deletedTiles.map((tile) => (
+                        <div key={tile.id} className="flex items-center justify-between gap-2 bg-amber-50/60 border border-amber-200/60 rounded-lg px-2.5 py-2">
+                          <div className="min-w-0">
+                            <div className="text-xs font-bold text-slate-800 font-nepali truncate">{tile.name}</div>
+                            <div className="text-[10px] text-slate-500">
+                              {tile.filename} · मेटिएको:{' '}
+                              {tile.deleted_at ? new Date(tile.deleted_at).toLocaleString() : '—'}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              disabled={restoringId === `tile-${tile.id}`}
+                              onClick={() => handleRestoreTile(tile)}
+                              className="p-1.5 text-emerald-700 hover:bg-emerald-100 rounded transition-colors"
+                              title="पुनर्स्थापना गर्नुहोस् (Restore)"
+                            >
+                              {restoringId === `tile-${tile.id}` ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <RotateCcw className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={permanentDeletingId === `tile-${tile.id}`}
+                              onClick={() => handlePermanentDeleteTile(tile)}
+                              className="p-1.5 text-gov-red-700 hover:bg-gov-red-100 rounded transition-colors"
+                              title="सधैंका लागि मेटाउनुहोस् (Delete forever — cannot be undone)"
+                            >
+                              {permanentDeletingId === `tile-${tile.id}` ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Trash2 className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           </div>
