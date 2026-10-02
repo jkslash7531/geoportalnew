@@ -62,18 +62,34 @@ VECTOR_EXTENSIONS = {".geojson", ".json", ".gpkg", ".kml"}
 RASTER_EXTENSIONS = {".mbtiles"}
 
 
-def _parts_dir() -> Path:
-    d = Path(settings.UPLOAD_DIR) / ".parts"
+def _parts_dir(kind: str = "vector") -> Path:
+    """
+    Directory holding chunk parts and session sidecars.
+
+    Raster uploads assemble DIRECTLY inside the tileserver data dir so the
+    finalize step is an atomic same-directory rename. Assembling in
+    /app/uploads and moving across bind mounts forces a full file copy
+    through the file-sharing layer, which fails with EIO on multi-GB files.
+    """
+    base = TILESERVER_DATA_DIR if kind == "raster" else Path(settings.UPLOAD_DIR)
+    d = base / ".parts"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def _session_path(upload_id: str) -> Path:
-    return _parts_dir() / f"{upload_id}.json"
+def _session_path(upload_id: str, parts_dir: Optional[Path] = None) -> Path:
+    if parts_dir is None:
+        # Sessions are looked up across both parts dirs.
+        for kind in ("vector", "raster"):
+            p = _parts_dir(kind) / f"{upload_id}.json"
+            if p.exists():
+                return p
+        return _parts_dir("vector") / f"{upload_id}.json"
+    return parts_dir / f"{upload_id}.json"
 
 
-def _part_path(upload_id: str) -> Path:
-    return _parts_dir() / f"{upload_id}.part"
+def _part_path(upload_id: str, parts_dir: Path) -> Path:
+    return parts_dir / f"{upload_id}.part"
 
 
 def _load_session(upload_id: str) -> Dict[str, Any]:
@@ -83,17 +99,29 @@ def _load_session(upload_id: str) -> Dict[str, Any]:
     if not p.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found")
     try:
-        return json.loads(p.read_text())
+        session = json.loads(p.read_text())
+        session["_parts_dir"] = str(p.parent)
+        return session
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found")
 
 
 def _save_session(session: Dict[str, Any]) -> None:
-    _session_path(session["upload_id"]).write_text(json.dumps(session))
+    parts_dir = Path(session.get("_parts_dir") or _parts_dir(session.get("kind", "vector")))
+    _session_path(session["upload_id"], parts_dir).write_text(
+        json.dumps({k: v for k, v in session.items() if not k.startswith("_")})
+    )
 
 
 def _delete_session(upload_id: str) -> None:
-    for p in (_session_path(upload_id), _part_path(upload_id)):
+    try:
+        session = _load_session(upload_id)
+        parts_dir = Path(session["_parts_dir"])
+    except HTTPException:
+        return
+    for p in (_session_path(upload_id, parts_dir), _part_path(upload_id, parts_dir)):
         try:
             if p.exists():
                 p.unlink()
@@ -105,12 +133,13 @@ def _cleanup_stale_sessions() -> None:
     """Remove upload sessions (and their partial files) older than the TTL."""
     try:
         now = time.time()
-        for p in _parts_dir().glob("*.json"):
-            try:
-                if now - p.stat().st_mtime > SESSION_TTL_SECONDS:
-                    _delete_session(p.stem)
-            except Exception:
-                continue
+        for kind in ("vector", "raster"):
+            for p in _parts_dir(kind).glob("*.json"):
+                try:
+                    if now - p.stat().st_mtime > SESSION_TTL_SECONDS:
+                        _delete_session(p.stem)
+                except Exception:
+                    continue
     except Exception:
         pass
 
@@ -168,6 +197,7 @@ async def init_upload(
 
     upload_id = uuid.uuid4().hex
     total_chunks = (payload.total_size + CHUNK_SIZE - 1) // CHUNK_SIZE
+    parts_dir = _parts_dir(payload.kind)
     session = {
         "upload_id": upload_id,
         "filename": _sanitize_filename(payload.filename),
@@ -178,6 +208,7 @@ async def init_upload(
         "received": [],
         "created_at": datetime.now(timezone.utc).isoformat(),
         "created_by": admin.id,
+        "_parts_dir": str(parts_dir),
         "params": {
             "name": payload.name.strip(),
             "description": payload.description,
@@ -189,7 +220,7 @@ async def init_upload(
     }
     _save_session(session)
     # Pre-create the (sparse) part file so chunk writes can seek.
-    _part_path(upload_id).touch(exist_ok=True)
+    _part_path(upload_id, parts_dir).touch(exist_ok=True)
     return {"upload_id": upload_id, "chunk_size": CHUNK_SIZE, "total_chunks": total_chunks}
 
 
@@ -217,7 +248,7 @@ async def upload_chunk(
             detail=f"Chunk {index} must be {expected} bytes, got {content_length}",
         )
 
-    part = _part_path(upload_id)
+    part = _part_path(upload_id, Path(session["_parts_dir"]))
     offset = index * session["chunk_size"]
     received = 0
     try:
@@ -297,7 +328,7 @@ async def complete_upload(
 ):
     """Assemble chunks and register the file as a tile package or vector layer."""
     session = _load_session(upload_id)
-    part = _part_path(upload_id)
+    part = _part_path(upload_id, Path(session["_parts_dir"]))
     if len(session["received"]) != session["total_chunks"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -314,6 +345,41 @@ async def complete_upload(
     return await _complete_vector(session, part, params, target_project_id, db, admin, background_tasks)
 
 
+def _robust_move(src: Path, dst: Path) -> None:
+    """
+    Move src -> dst, preferring an atomic rename.
+
+    os.rename is atomic when source and destination live on the same mount
+    (our raster parts assemble inside the tileserver data dir for exactly
+    this reason). If rename ever fails (e.g. cross-mount), fall back to a
+    streaming copy with retries instead of one giant shutil.move, then
+    remove the source.
+    """
+    try:
+        os.rename(src, dst)
+        return
+    except OSError:
+        pass
+    last_err: Optional[Exception] = None
+    for attempt in range(3):
+        try:
+            with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+                shutil.copyfileobj(fsrc, fdst, length=64 * 1024 * 1024)
+                fdst.flush()
+                os.fsync(fdst.fileno())
+            os.remove(src)
+            return
+        except Exception as e:  # noqa: BLE001 - retry then report
+            last_err = e
+            try:
+                if dst.exists():
+                    dst.unlink()
+            except Exception:
+                pass
+            time.sleep(2 * (attempt + 1))
+    raise last_err if last_err else OSError("move failed")
+
+
 async def _complete_raster(session, part: Path, params, target_project_id, db, admin):
     """Move the assembled .mbtiles into the tileserver data dir and register it."""
     TILESERVER_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -323,7 +389,8 @@ async def _complete_raster(session, part: Path, params, target_project_id, db, a
         safe_filename = f"{int(time.time())}_{safe_filename[:60]}"
         dest = TILESERVER_DATA_DIR / safe_filename
     try:
-        shutil.move(str(part), str(dest))
+        # part lives in TILESERVER_DATA_DIR/.parts -> same-mount atomic rename
+        _robust_move(part, dest)
         try:
             os.chmod(dest, 0o664)
         except Exception:
@@ -385,7 +452,7 @@ async def _complete_vector(session, part: Path, params, target_project_id, db, a
     final_path = Path(settings.UPLOAD_DIR) / final_name
     final_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        shutil.move(str(part), str(final_path))
+        _robust_move(part, final_path)
     except Exception as e:
         _delete_session(session["upload_id"])
         raise HTTPException(
@@ -430,6 +497,10 @@ _GEOM_TYPE_MAP = {
 
 _PG_NUMERIC = {"integer", "bigint", "smallint", "double precision", "numeric", "real"}
 
+# Rows per INSERT ... SELECT batch during bulk import. Each batch commits
+# separately and reports progress; 500k is a good throughput/progress mix.
+INSERT_BATCH_SIZE = 500_000
+
 
 def _run_vector_import(layer_id: int, src_path: str, staging: str, created_by: int) -> None:
     """
@@ -458,6 +529,14 @@ def _run_vector_import(layer_id: int, src_path: str, staging: str, created_by: i
                     {"msg": msg[:2000], "lid": layer_id},
                 )
                 conn.execute(sql_text(f'DROP TABLE IF EXISTS "{staging}"'))
+                # The GIST index is dropped for bulk loads; make sure it
+                # exists again even when the import dies halfway.
+                conn.execute(
+                    sql_text(
+                        "CREATE INDEX IF NOT EXISTS idx_feature_geom "
+                        "ON vector_features USING gist (geom)"
+                    )
+                )
         except Exception as e:
             print(f"{log_prefix} could not record failure: {e}")
 
@@ -517,17 +596,67 @@ def _run_vector_import(layer_id: int, src_path: str, staging: str, created_by: i
                     "required": False,
                 })
 
-            # Bulk move: one statement, ST_Force2D strips Z/M, props -> JSONB.
-            result = conn.execute(
+            # How many rows are we about to move? (drives progress reporting)
+            total = conn.execute(
+                sql_text(f'SELECT COUNT(*) FROM "{staging}"')
+            ).scalar() or 0
+            # Drop the GIST index for the bulk load: maintaining it row-by-row
+            # for millions of rows is the slowest part of the import. It is
+            # rebuilt in one bulk pass afterwards (IF NOT EXISTS: concurrent
+            # imports of other layers share this state safely).
+            conn.execute(sql_text("DROP INDEX IF EXISTS idx_feature_geom"))
+            conn.execute(
                 sql_text(
-                    "INSERT INTO vector_features (layer_id, geom, properties, created_by) "
-                    "SELECT :lid, ST_Force2D(ST_SetSRID(geom, 4326)), "
-                    "to_jsonb(s) - 'geom' - 'ogc_fid', :uid "
-                    f'FROM "{staging}" AS s'
+                    "UPDATE vector_layers SET import_total=:t, import_count=0 "
+                    "WHERE id=:lid"
                 ),
-                {"lid": layer_id, "uid": created_by},
+                {"t": total, "lid": layer_id},
             )
-            feature_count = result.rowcount or 0
+
+        # Batched bulk move: ST_Force2D strips Z/M, props -> JSONB.
+        # Each batch commits separately (smaller WAL spikes) and reports
+        # progress so the UI can show "1.2M / 3.4M features".
+        max_fid = 0
+        if total > 0:
+            with engine.begin() as conn:
+                max_fid = conn.execute(
+                    sql_text(f'SELECT MAX(ogc_fid) FROM "{staging}"')
+                ).scalar() or 0
+        inserted = 0
+        lo = 0
+        while lo <= max_fid and total > 0:
+            hi = lo + INSERT_BATCH_SIZE
+            with engine.begin() as conn:
+                result = conn.execute(
+                    sql_text(
+                        "INSERT INTO vector_features (layer_id, geom, properties, created_by) "
+                        "SELECT :lid, ST_Force2D(ST_SetSRID(geom, 4326)), "
+                        "to_jsonb(s) - 'geom' - 'ogc_fid', :uid "
+                        f'FROM "{staging}" AS s '
+                        "WHERE s.ogc_fid >= :lo AND s.ogc_fid < :hi"
+                    ),
+                    {"lid": layer_id, "uid": created_by, "lo": lo, "hi": hi},
+                )
+                inserted += result.rowcount or 0
+                conn.execute(
+                    sql_text(
+                        "UPDATE vector_layers SET import_count=:n WHERE id=:lid"
+                    ),
+                    {"n": inserted, "lid": layer_id},
+                )
+            print(f"{log_prefix} {inserted}/{total} features")
+            lo = hi
+        feature_count = inserted
+
+        with engine.begin() as conn:
+            # Bulk-build the spatial index in one pass (far faster than
+            # incremental maintenance during the load).
+            conn.execute(
+                sql_text(
+                    "CREATE INDEX IF NOT EXISTS idx_feature_geom "
+                    "ON vector_features USING gist (geom)"
+                )
+            )
 
             # Merge feature_count into metadata_info
             meta_row = conn.execute(
@@ -541,17 +670,27 @@ def _run_vector_import(layer_id: int, src_path: str, staging: str, created_by: i
             conn.execute(
                 sql_text(
                     "UPDATE vector_layers SET geometry_type=:gt, fields_config=:fc, "
-                    "metadata_info=:mi, import_status='complete', import_error=NULL "
-                    "WHERE id=:lid"
+                    "metadata_info=:mi, import_status='complete', import_error=NULL, "
+                    "import_count=:n WHERE id=:lid"
                 ),
                 {
                     "gt": geom_type.value,
                     "fc": json.dumps(fields_config),
                     "mi": json.dumps(metadata_info),
+                    "n": feature_count,
                     "lid": layer_id,
                 },
             )
             conn.execute(sql_text(f'DROP TABLE "{staging}"'))
+
+        # Refresh planner stats after the massive insert (best effort;
+        # VACUUM cannot run inside a transaction block).
+        try:
+            with engine.connect() as conn:
+                conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+                conn.execute(sql_text("VACUUM ANALYZE vector_features"))
+        except Exception as e:
+            print(f"{log_prefix} VACUUM skipped: {e}")
 
         print(f"{log_prefix} imported {feature_count} features")
     except Exception as e:

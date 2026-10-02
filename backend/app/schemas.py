@@ -227,6 +227,8 @@ class LayerResponse(BaseModel):
     deleted_at: Optional[datetime] = None
     import_status: Optional[str] = "complete"
     import_error: Optional[str] = None
+    import_total: Optional[int] = 0
+    import_count: Optional[int] = 0
     created_at: datetime
 
 

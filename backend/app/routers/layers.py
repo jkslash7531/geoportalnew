@@ -117,6 +117,8 @@ async def create_layer(
         deleted_at=layer.deleted_at,
         import_status=layer.import_status,
         import_error=layer.import_error,
+        import_total=layer.import_total,
+        import_count=layer.import_count,
         created_at=layer.created_at,
     )
 
@@ -206,6 +208,8 @@ async def list_global_layers(
             deleted_at=layer.deleted_at,
         import_status=layer.import_status,
         import_error=layer.import_error,
+        import_total=layer.import_total,
+        import_count=layer.import_count,
         created_at=layer.created_at,
         ))
     return responses
@@ -269,6 +273,8 @@ async def list_project_layers(
             deleted_at=layer.deleted_at,
         import_status=layer.import_status,
         import_error=layer.import_error,
+        import_total=layer.import_total,
+        import_count=layer.import_count,
         created_at=layer.created_at,
         ))
     return responses
@@ -315,6 +321,8 @@ async def create_project_layer(
         deleted_at=layer.deleted_at,
         import_status=layer.import_status,
         import_error=layer.import_error,
+        import_total=layer.import_total,
+        import_count=layer.import_count,
         created_at=layer.created_at,
     )
 
@@ -354,6 +362,8 @@ async def update_layer(
         deleted_at=layer.deleted_at,
         import_status=layer.import_status,
         import_error=layer.import_error,
+        import_total=layer.import_total,
+        import_count=layer.import_count,
         created_at=layer.created_at,
     )
 
@@ -389,6 +399,8 @@ async def list_deleted_layers(
             deleted_at=layer.deleted_at,
         import_status=layer.import_status,
         import_error=layer.import_error,
+        import_total=layer.import_total,
+        import_count=layer.import_count,
         created_at=layer.created_at,
         ))
     return responses
@@ -495,6 +507,8 @@ async def get_layer(
         deleted_at=layer.deleted_at,
         import_status=layer.import_status,
         import_error=layer.import_error,
+        import_total=layer.import_total,
+        import_count=layer.import_count,
         created_at=layer.created_at,
     )
 
@@ -958,5 +972,7 @@ async def upload_vector_layer(
         deleted_at=layer.deleted_at,
         import_status=layer.import_status,
         import_error=layer.import_error,
+        import_total=layer.import_total,
+        import_count=layer.import_count,
         created_at=layer.created_at,
     )
