@@ -44,6 +44,7 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 bun-debug.log*
+frontend/bun.lock
 
 # ---- Next.js ----
 frontend/.next/
