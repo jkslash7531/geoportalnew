@@ -225,6 +225,8 @@ class LayerResponse(BaseModel):
     creation_geometry_types: Optional[List[str]] = None
     geometry_fields_config: Optional[Dict[str, Any]] = None
     deleted_at: Optional[datetime] = None
+    import_status: Optional[str] = "complete"
+    import_error: Optional[str] = None
     created_at: datetime
 
 

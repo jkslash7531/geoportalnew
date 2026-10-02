@@ -37,6 +37,7 @@ from app.routers import (
     house_numbering,
     modules,
     questionnaires,
+    uploads,
 )
 
 settings = get_settings()
@@ -113,3 +114,4 @@ app.include_router(analytics.router)
 app.include_router(house_numbering.router)
 app.include_router(modules.router)
 app.include_router(questionnaires.router)
+app.include_router(uploads.router)

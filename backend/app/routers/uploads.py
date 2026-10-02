@@ -1,0 +1,572 @@
+"""
+Resumable chunked uploads for very large files (up to 100 GB).
+
+Why this exists: a single giant multipart POST forces Starlette to spool the
+entire file to a temp file before the endpoint runs. For multi-GB files that
+temp write (on a bind-mounted volume) fails with Errno 5, needs 2x disk, and
+offers no resume. Instead the client splits the file into 32 MB chunks and
+POSTs them as raw bytes; the server appends each chunk at its offset, so a
+dropped connection only re-sends one chunk.
+
+Flow:
+    POST /api/uploads/init                 -> {upload_id, chunk_size}
+    POST /api/uploads/{id}/chunk?index=N   (repeat, raw bytes)
+    GET  /api/uploads/{id}                 (status / resume offset)
+    POST /api/uploads/{id}/complete        -> registers layer / tile package
+    DELETE /api/uploads/{id}               (abort and clean up)
+
+Vector files are imported with ogr2ogr (GDAL) in a background thread:
+staging table -> single bulk INSERT ... SELECT into vector_features.
+Millions of features import in minutes instead of hours.
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+
+from app.auth import require_role
+from app.cache import invalidate_layer_cache
+from app.config import get_settings
+from app.database import get_db
+from app.models import GeometryType, MBTilesPackage, SurveyProject, User, UserRole, VectorLayer
+from app.schemas import MBTilesResponse
+from app.tileserver import (
+    TILESERVER_DATA_DIR,
+    extract_mbtiles_metadata,
+    get_file_size,
+    regenerate_tileserver_config,
+)
+
+router = APIRouter(prefix="/api/uploads", tags=["Uploads"])
+
+settings = get_settings()
+
+# 32 MB chunks: small enough to stream with constant memory, large enough that
+# a 100 GB file needs only ~3,200 requests.
+CHUNK_SIZE = 32 * 1024 * 1024
+# Abandoned upload sessions older than this are cleaned up opportunistically.
+SESSION_TTL_SECONDS = 24 * 3600
+
+VECTOR_EXTENSIONS = {".geojson", ".json", ".gpkg", ".kml"}
+RASTER_EXTENSIONS = {".mbtiles"}
+
+
+def _parts_dir() -> Path:
+    d = Path(settings.UPLOAD_DIR) / ".parts"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _session_path(upload_id: str) -> Path:
+    return _parts_dir() / f"{upload_id}.json"
+
+
+def _part_path(upload_id: str) -> Path:
+    return _parts_dir() / f"{upload_id}.part"
+
+
+def _load_session(upload_id: str) -> Dict[str, Any]:
+    if not re.fullmatch(r"[0-9a-f]{32}", upload_id or ""):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found")
+    p = _session_path(upload_id)
+    if not p.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found")
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found")
+
+
+def _save_session(session: Dict[str, Any]) -> None:
+    _session_path(session["upload_id"]).write_text(json.dumps(session))
+
+
+def _delete_session(upload_id: str) -> None:
+    for p in (_session_path(upload_id), _part_path(upload_id)):
+        try:
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
+
+
+def _cleanup_stale_sessions() -> None:
+    """Remove upload sessions (and their partial files) older than the TTL."""
+    try:
+        now = time.time()
+        for p in _parts_dir().glob("*.json"):
+            try:
+                if now - p.stat().st_mtime > SESSION_TTL_SECONDS:
+                    _delete_session(p.stem)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+def _sanitize_filename(filename: str, default_stem: str = "upload") -> str:
+    base = os.path.basename(filename or "")
+    stem = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", Path(base).stem).strip("_.") or default_stem
+    ext = Path(base).suffix.lower()
+    return f"{stem[:80]}{ext}"
+
+
+def _expected_chunk_size(session: Dict[str, Any], index: int) -> int:
+    total = session["total_size"]
+    start = index * session["chunk_size"]
+    return max(0, min(session["chunk_size"], total - start))
+
+
+class InitUploadRequest(BaseModel):
+    filename: str = Field(..., min_length=1, max_length=500)
+    total_size: int = Field(..., gt=0)
+    kind: str = Field(..., pattern="^(vector|raster)$")
+    # Registration metadata used at completion time
+    name: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+    is_global: bool = True
+    project_id: Optional[int] = None
+    editable_by_collectors: bool = True
+    allow_snapping: bool = True
+
+
+@router.post("/init")
+async def init_upload(
+    payload: InitUploadRequest,
+    admin: User = Depends(require_role(UserRole.GisAdmin)),
+):
+    """Start a resumable upload session. Returns upload_id and chunk_size."""
+    _cleanup_stale_sessions()
+
+    ext = Path(payload.filename).suffix.lower()
+    allowed = VECTOR_EXTENSIONS if payload.kind == "vector" else RASTER_EXTENSIONS
+    if ext not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported extension '{ext}' for {payload.kind} upload. "
+                   f"Allowed: {sorted(allowed)}",
+        )
+
+    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    if payload.total_size > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File too large ({payload.total_size / 1e9:.1f} GB). "
+                   f"Limit is {settings.MAX_UPLOAD_SIZE_MB / 1024:.0f} GB.",
+        )
+
+    upload_id = uuid.uuid4().hex
+    total_chunks = (payload.total_size + CHUNK_SIZE - 1) // CHUNK_SIZE
+    session = {
+        "upload_id": upload_id,
+        "filename": _sanitize_filename(payload.filename),
+        "kind": payload.kind,
+        "total_size": payload.total_size,
+        "chunk_size": CHUNK_SIZE,
+        "total_chunks": total_chunks,
+        "received": [],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_by": admin.id,
+        "params": {
+            "name": payload.name.strip(),
+            "description": payload.description,
+            "is_global": payload.is_global,
+            "project_id": payload.project_id,
+            "editable_by_collectors": payload.editable_by_collectors,
+            "allow_snapping": payload.allow_snapping,
+        },
+    }
+    _save_session(session)
+    # Pre-create the (sparse) part file so chunk writes can seek.
+    _part_path(upload_id).touch(exist_ok=True)
+    return {"upload_id": upload_id, "chunk_size": CHUNK_SIZE, "total_chunks": total_chunks}
+
+
+@router.post("/{upload_id}/chunk")
+async def upload_chunk(
+    upload_id: str,
+    index: int = Query(..., ge=0),
+    request: Request = None,
+    admin: User = Depends(require_role(UserRole.GisAdmin)),
+):
+    """
+    Upload one chunk as raw bytes (Content-Type: application/octet-stream).
+    Chunks are written at index * chunk_size, so retries are idempotent and
+    resume is trivial. Clients should send chunks sequentially.
+    """
+    session = _load_session(upload_id)
+    if index >= session["total_chunks"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Chunk index out of range")
+
+    expected = _expected_chunk_size(session, index)
+    content_length = request.headers.get("content-length")
+    if content_length is not None and int(content_length) != expected:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Chunk {index} must be {expected} bytes, got {content_length}",
+        )
+
+    part = _part_path(upload_id)
+    offset = index * session["chunk_size"]
+    received = 0
+    try:
+        with open(part, "r+b") as f:
+            f.seek(offset)
+            async for piece in request.stream():
+                f.write(piece)
+                received += len(piece)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to write chunk {index}: {e}",
+        )
+    if received != expected:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Chunk {index} incomplete: expected {expected} bytes, got {received}",
+        )
+
+    if index not in session["received"]:
+        session["received"].append(index)
+        _save_session(session)
+    return {
+        "upload_id": upload_id,
+        "index": index,
+        "received_chunks": len(session["received"]),
+        "total_chunks": session["total_chunks"],
+    }
+
+
+@router.get("/{upload_id}")
+async def upload_status(
+    upload_id: str,
+    admin: User = Depends(require_role(UserRole.GisAdmin)),
+):
+    """Poll an upload session (used to resume after a dropped connection)."""
+    session = _load_session(upload_id)
+    return {
+        "upload_id": upload_id,
+        "filename": session["filename"],
+        "kind": session["kind"],
+        "total_size": session["total_size"],
+        "chunk_size": session["chunk_size"],
+        "total_chunks": session["total_chunks"],
+        "received_chunks": len(session["received"]),
+        "next_index": min(set(range(session["total_chunks"])) - set(session["received"]), default=None),
+        "complete": len(session["received"]) == session["total_chunks"],
+    }
+
+
+@router.delete("/{upload_id}")
+async def abort_upload(
+    upload_id: str,
+    admin: User = Depends(require_role(UserRole.GisAdmin)),
+):
+    """Abort an upload and delete its partial data."""
+    _load_session(upload_id)  # 404 if unknown
+    _delete_session(upload_id)
+    return {"ok": True}
+
+
+async def _validate_project(db, is_global: bool, project_id: Optional[int]) -> Optional[int]:
+    if not is_global and project_id:
+        res = await db.execute(select(SurveyProject).where(SurveyProject.id == project_id))
+        if not res.scalar_one_or_none():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target project not found")
+        return project_id
+    return None
+
+
+@router.post("/{upload_id}/complete")
+async def complete_upload(
+    upload_id: str,
+    background_tasks: BackgroundTasks,
+    db=Depends(get_db),
+    admin: User = Depends(require_role(UserRole.GisAdmin)),
+):
+    """Assemble chunks and register the file as a tile package or vector layer."""
+    session = _load_session(upload_id)
+    part = _part_path(upload_id)
+    if len(session["received"]) != session["total_chunks"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Upload incomplete: {len(session['received'])}/{session['total_chunks']} chunks received",
+        )
+    if not part.exists() or part.stat().st_size != session["total_size"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Assembled file size mismatch")
+
+    params = session["params"]
+    target_project_id = await _validate_project(db, params["is_global"], params["project_id"])
+
+    if session["kind"] == "raster":
+        return await _complete_raster(session, part, params, target_project_id, db, admin)
+    return await _complete_vector(session, part, params, target_project_id, db, admin, background_tasks)
+
+
+async def _complete_raster(session, part: Path, params, target_project_id, db, admin):
+    """Move the assembled .mbtiles into the tileserver data dir and register it."""
+    TILESERVER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    safe_filename = session["filename"]
+    dest = TILESERVER_DATA_DIR / safe_filename
+    if dest.exists():
+        safe_filename = f"{int(time.time())}_{safe_filename[:60]}"
+        dest = TILESERVER_DATA_DIR / safe_filename
+    try:
+        shutil.move(str(part), str(dest))
+        try:
+            os.chmod(dest, 0o664)
+        except Exception:
+            pass
+    except Exception as e:
+        _delete_session(session["upload_id"])
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save file: {e}",
+        )
+
+    file_size = get_file_size(safe_filename)
+    meta = extract_mbtiles_metadata(safe_filename)
+    try:
+        package = MBTilesPackage(
+            name=params["name"],
+            filename=safe_filename,
+            description=params.get("description"),
+            bounds=meta.get("bounds"),
+            center=meta.get("center"),
+            min_zoom=meta.get("min_zoom"),
+            max_zoom=meta.get("max_zoom"),
+            file_size=file_size,
+            is_global=params["is_global"],
+            project_id=target_project_id,
+            uploaded_by=admin.id,
+        )
+        db.add(package)
+        await db.flush()
+        await regenerate_tileserver_config(db)
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        try:
+            if dest.exists():
+                dest.unlink()
+        except Exception:
+            pass
+        _delete_session(session["upload_id"])
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to register MBTiles package: {e}",
+        )
+
+    _delete_session(session["upload_id"])
+    return MBTilesResponse(
+        id=package.id, name=package.name, filename=package.filename,
+        description=package.description, bounds=package.bounds,
+        center=package.center, min_zoom=package.min_zoom, max_zoom=package.max_zoom,
+        file_size=package.file_size, is_global=package.is_global,
+        project_id=package.project_id, created_at=package.created_at,
+    )
+
+
+async def _complete_vector(session, part: Path, params, target_project_id, db, admin, background_tasks):
+    """Create the layer row and import features in the background with ogr2ogr."""
+    # Keep the assembled file: the background import reads it, then deletes it.
+    final_name = f"{session['upload_id']}_{session['filename']}"
+    final_path = Path(settings.UPLOAD_DIR) / final_name
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.move(str(part), str(final_path))
+    except Exception as e:
+        _delete_session(session["upload_id"])
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save file: {e}",
+        )
+    _delete_session(session["upload_id"])
+
+    layer = VectorLayer(
+        name=params["name"],
+        geometry_type=GeometryType.GEOMETRY,  # refined after import
+        is_global=params["is_global"],
+        project_id=target_project_id,
+        editable_by_collectors=params.get("editable_by_collectors", True),
+        allow_snapping=params.get("allow_snapping", True),
+        fields_config=[],
+        source_filename=session["filename"],
+        import_status="importing",
+        created_by=admin.id,
+    )
+    db.add(layer)
+    await db.flush()
+    layer_id = layer.id
+    await db.commit()
+
+    staging = f"stg_{session['upload_id']}"
+    background_tasks.add_task(
+        _run_vector_import, layer_id, str(final_path), staging, admin.id
+    )
+    return {"id": layer_id, "name": layer.name, "import_status": "importing"}
+
+
+# Map PostGIS ST_GeometryType() output to the app's GeometryType enum.
+_GEOM_TYPE_MAP = {
+    "ST_Point": GeometryType.POINT,
+    "ST_LineString": GeometryType.LINESTRING,
+    "ST_Polygon": GeometryType.POLYGON,
+    "ST_MultiPoint": GeometryType.MULTIPOINT,
+    "ST_MultiLineString": GeometryType.MULTILINESTRING,
+    "ST_MultiPolygon": GeometryType.MULTIPOLYGON,
+}
+
+_PG_NUMERIC = {"integer", "bigint", "smallint", "double precision", "numeric", "real"}
+
+
+def _run_vector_import(layer_id: int, src_path: str, staging: str, created_by: int) -> None:
+    """
+    Bulk-import a vector file into vector_features (runs in a worker thread).
+
+    ogr2ogr streams the file into a staging table (C speed, constant memory),
+    then a single INSERT ... SELECT moves millions of rows with one statement.
+    """
+    import asyncio as _asyncio
+
+    from sqlalchemy import create_engine, text as sql_text
+
+    s = get_settings()
+    log_prefix = f"[vector-import layer={layer_id}]"
+    engine = create_engine(s.DATABASE_URL_SYNC, pool_pre_ping=True)
+
+    def _fail(msg: str) -> None:
+        print(f"{log_prefix} FAILED: {msg}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    sql_text(
+                        "UPDATE vector_layers SET import_status='failed', "
+                        "import_error=:msg WHERE id=:lid"
+                    ),
+                    {"msg": msg[:2000], "lid": layer_id},
+                )
+                conn.execute(sql_text(f'DROP TABLE IF EXISTS "{staging}"'))
+        except Exception as e:
+            print(f"{log_prefix} could not record failure: {e}")
+
+    try:
+        print(f"{log_prefix} starting ogr2ogr for {src_path}")
+        env = os.environ.copy()
+        env["PGPASSWORD"] = s.POSTGRES_PASSWORD  # keeps it out of the cmdline
+        pg_conn = (
+            f"PG:host={s.POSTGRES_HOST} port={s.POSTGRES_PORT} "
+            f"dbname={s.POSTGRES_DB} user={s.POSTGRES_USER}"
+        )
+        cmd = [
+            "ogr2ogr", "-f", "PostgreSQL", pg_conn, src_path,
+            "-nln", staging,
+            "-t_srs", "EPSG:4326",          # reproject in C, not per-feature Python
+            "-lco", "GEOMETRY_NAME=geom",
+            "-lco", "FID=ogc_fid",
+            "--config", "PG_USE_COPY", "YES",  # COPY protocol, not row inserts
+        ]
+        proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=6 * 3600)
+        if proc.returncode != 0:
+            _fail(f"ogr2ogr failed: {(proc.stderr or proc.stdout)[-1500:]}")
+            return
+
+        with engine.begin() as conn:
+            # Dominant geometry type -> layer.geometry_type
+            gtype_row = conn.execute(
+                sql_text(
+                    f'SELECT ST_GeometryType(geom) AS g, COUNT(*) AS c FROM "{staging}" '
+                    "GROUP BY 1 ORDER BY 2 DESC LIMIT 1"
+                )
+            ).first()
+            geom_type = _GEOM_TYPE_MAP.get(gtype_row[0] if gtype_row else None, GeometryType.GEOMETRY)
+
+            # Field list from staging columns (skip internal cols)
+            cols = conn.execute(
+                sql_text(
+                    "SELECT column_name, data_type FROM information_schema.columns "
+                    "WHERE table_name=:t AND column_name NOT IN ('geom','ogc_fid') "
+                    "ORDER BY ordinal_position"
+                ),
+                {"t": staging},
+            ).all()
+            fields_config: List[Dict[str, Any]] = []
+            for col_name, data_type in cols:
+                if col_name.startswith("_"):
+                    continue
+                ftype = "text"
+                if data_type == "boolean":
+                    ftype = "checkbox"
+                elif data_type in _PG_NUMERIC:
+                    ftype = "number"
+                fields_config.append({
+                    "name": col_name,
+                    "label": col_name.replace("_", " ").title(),
+                    "type": ftype,
+                    "required": False,
+                })
+
+            # Bulk move: one statement, ST_Force2D strips Z/M, props -> JSONB.
+            result = conn.execute(
+                sql_text(
+                    "INSERT INTO vector_features (layer_id, geom, properties, created_by) "
+                    "SELECT :lid, ST_Force2D(ST_SetSRID(geom, 4326)), "
+                    "to_jsonb(s) - 'geom' - 'ogc_fid', :uid "
+                    f'FROM "{staging}" AS s'
+                ),
+                {"lid": layer_id, "uid": created_by},
+            )
+            feature_count = result.rowcount or 0
+
+            # Merge feature_count into metadata_info
+            meta_row = conn.execute(
+                sql_text("SELECT metadata_info FROM vector_layers WHERE id=:lid"),
+                {"lid": layer_id},
+            ).first()
+            metadata_info = dict(meta_row[0] or {}) if meta_row else {}
+            metadata_info["feature_count"] = feature_count
+            metadata_info["imported_at"] = datetime.now(timezone.utc).isoformat()
+
+            conn.execute(
+                sql_text(
+                    "UPDATE vector_layers SET geometry_type=:gt, fields_config=:fc, "
+                    "metadata_info=:mi, import_status='complete', import_error=NULL "
+                    "WHERE id=:lid"
+                ),
+                {
+                    "gt": geom_type.value,
+                    "fc": json.dumps(fields_config),
+                    "mi": json.dumps(metadata_info),
+                    "lid": layer_id,
+                },
+            )
+            conn.execute(sql_text(f'DROP TABLE "{staging}"'))
+
+        print(f"{log_prefix} imported {feature_count} features")
+    except Exception as e:
+        _fail(str(e))
+        return
+    finally:
+        try:
+            if os.path.exists(src_path):
+                os.remove(src_path)  # source lives in PostGIS now; reclaim space
+        except Exception:
+            pass
+        engine.dispose()
+
+    # Fresh tiles for the new data (best effort)
+    try:
+        _asyncio.run(invalidate_layer_cache(layer_id))
+    except Exception:
+        pass

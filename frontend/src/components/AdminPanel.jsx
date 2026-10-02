@@ -15,6 +15,7 @@ import {
 import { useAuth } from '../lib/auth';
 import {
   usersAPI, projectsAPI, layersAPI, tilesAPI, trackingAPI, triggerFileDownload,
+  uploadFileResumable,
 } from '../lib/api';
 import QuestionnaireBuilder from './questionnaire/QuestionnaireBuilder';
 import RecordsReviewTable from './questionnaire/RecordsReviewTable';
@@ -208,32 +209,64 @@ export default function AdminPanel({
       return;
     }
 
-    const formData = new FormData();
-    formData.append('name', layerUploadForm.name);
-    formData.append('is_global', isGlobal ? 'true' : 'false');
-    if (targetProjId) {
-      formData.append('project_id', String(targetProjId));
-    }
-    formData.append('editable_by_collectors', layerUploadForm.editable_by_collectors ? 'true' : 'false');
-    formData.append('allow_snapping', layerUploadForm.allow_snapping ? 'true' : 'false');
-    formData.append('file', fileInput.files[0]);
+    const file = fileInput.files[0];
+    if (!file) return;
 
+    // Resumable chunked upload (handles multi-GB files), then the server
+    // bulk-imports features with ogr2ogr. Poll import_status until done.
+    const onProgress = (p) => {
+      const percent = p.total ? Math.round((p.loaded * 100) / p.total) : 0;
+      setUploadProgress({ percent, loaded: p.loaded, total: p.total, phase: p.phase });
+    };
     try {
       setLoading(true);
-      setUploadProgress({ percent: 0, loaded: 0, total: 0 });
-      await layersAPI.upload(formData, (progressEvent) => {
-        if (progressEvent.total) {
-          const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-          setUploadProgress({
-            percent,
-            loaded: progressEvent.loaded,
-            total: progressEvent.total,
-          });
-        }
-      });
+      onProgress({ phase: 'uploading', loaded: 0, total: file.size });
+      const result = await uploadFileResumable(file, {
+        kind: 'vector',
+        name: layerUploadForm.name,
+        is_global: isGlobal,
+        project_id: targetProjId,
+        editable_by_collectors: layerUploadForm.editable_by_collectors,
+        allow_snapping: layerUploadForm.allow_snapping,
+      }, onProgress);
 
-      const scopeText = isGlobal ? 'सार्वजनिक तह (Global Layer)' : 'विशेष परियोजना तह (Project-Scoped Layer)';
-      setMessage({ type: 'success', text: `भेक्टर तह (${scopeText}) सफलतापूर्वक अपलोड भयो` });
+      // Wait for the background bulk import (millions of features take minutes)
+      if (result && result.import_status === 'importing' && result.id) {
+        const deadline = Date.now() + 60 * 60 * 1000; // 1h cap
+        for (;;) {
+          await new Promise((r) => setTimeout(r, 3000));
+          let layer;
+          try {
+            layer = (await layersAPI.get(result.id)).data;
+          } catch {
+            break; // layer fetch failed; fall through to refresh
+          }
+          if (layer.import_status === 'complete') {
+            const n = layer.feature_count ?? layer.metadata_info?.feature_count;
+            setMessage({
+              type: 'success',
+              text: `भेक्टर तह सफलतापूर्वक अपलोड भयो` +
+                (n ? ` — ${Number(n).toLocaleString()} फिचर आयात गरियो` : ''),
+            });
+            break;
+          }
+          if (layer.import_status === 'failed') {
+            setMessage({
+              type: 'error',
+              text: `फिचर आयात असफल भयो: ${layer.import_error || 'अज्ञात त्रुटि'}`,
+            });
+            break;
+          }
+          setUploadProgress({ percent: 100, loaded: file.size, total: file.size, phase: 'importing' });
+          if (Date.now() > deadline) {
+            setMessage({ type: 'success', text: 'भेक्टर तह अपलोड भयो — फिचर आयात पृष्ठभूमिमा जारी छ' });
+            break;
+          }
+        }
+      } else {
+        const scopeText = isGlobal ? 'सार्वजनिक तह (Global Layer)' : 'विशेष परियोजना तह (Project-Scoped Layer)';
+        setMessage({ type: 'success', text: `भेक्टर तह (${scopeText}) सफलतापूर्वक अपलोड भयो` });
+      }
       setShowLayerUpload(false);
       setLayerUploadForm({ name: '', scope: 'GLOBAL', projectId: '', editable_by_collectors: true, allow_snapping: true });
       loadData();
@@ -595,30 +628,25 @@ export default function AdminPanel({
       return;
     }
 
-    const formData = new FormData();
-    formData.append('name', tileUploadForm.name);
-    if (tileUploadForm.description) {
-      formData.append('description', tileUploadForm.description);
-    }
-    formData.append('is_global', isGlobal ? 'true' : 'false');
-    if (targetProjId) {
-      formData.append('project_id', String(targetProjId));
-    }
-    formData.append('file', fileInput.files[0]);
+    const file = fileInput.files[0];
+    if (!file) return;
 
+    // Resumable chunked upload — handles multi-GB .mbtiles without the
+    // giant-temp-file failure mode of single-shot multipart posts.
+    const onProgress = (p) => {
+      const percent = p.total ? Math.round((p.loaded * 100) / p.total) : 0;
+      setUploadProgress({ percent, loaded: p.loaded, total: p.total, phase: p.phase });
+    };
     try {
       setLoading(true);
-      setUploadProgress({ percent: 0, loaded: 0, total: 0 });
-      await tilesAPI.upload(formData, (progressEvent) => {
-        if (progressEvent.total) {
-          const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-          setUploadProgress({
-            percent,
-            loaded: progressEvent.loaded,
-            total: progressEvent.total,
-          });
-        }
-      });
+      onProgress({ phase: 'uploading', loaded: 0, total: file.size });
+      await uploadFileResumable(file, {
+        kind: 'raster',
+        name: tileUploadForm.name,
+        description: tileUploadForm.description || null,
+        is_global: isGlobal,
+        project_id: targetProjId,
+      }, onProgress);
 
       const scopeText = isGlobal ? 'सार्वजनिक इमेज्री (Global)' : 'विशेष परियोजना इमेज्री (Project-Scoped)';
       setMessage({ type: 'success', text: `ड्रोन इमेज्री (${scopeText}) सफलतापूर्वक अपलोड भयो र टाइल सर्भरमा सक्रिय गरियो` });
@@ -1771,7 +1799,7 @@ export default function AdminPanel({
                 {uploadProgress && (
                   <div className="space-y-1 py-1">
                     <div className="flex justify-between text-xs text-slate-600 font-semibold font-nepali">
-                      <span>अपलोड हुँदैछ...</span>
+                      <span>{uploadProgress.phase === 'importing' ? 'फिचर आयात हुँदैछ... (पृष्ठभूमिमा जारी छ)' : uploadProgress.phase === 'assembling' ? 'फाइल जोडिँदैछ...' : 'अपलोड हुँदैछ...'}</span>
                       <span className="font-mono text-gov-blue-800 font-bold">{uploadProgress.percent}%</span>
                     </div>
                     <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
@@ -1845,6 +1873,16 @@ export default function AdminPanel({
                           <span>{layer.geometry_type}</span>
                           <span>&middot;</span>
                           <span>{layer.feature_count} वस्तुहरू</span>
+                          {layer.import_status === 'importing' && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-nepali font-semibold">
+                              <Loader2 className="w-2.5 h-2.5 animate-spin" /> आयात हुँदैछ
+                            </span>
+                          )}
+                          {layer.import_status === 'failed' && (
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded-full bg-red-100 text-red-800 font-nepali font-semibold" title={layer.import_error || ''}>
+                              आयात असफल
+                            </span>
+                          )}
                         </div>
                       </div>
 
@@ -2326,7 +2364,7 @@ export default function AdminPanel({
                 {uploadProgress && (
                   <div className="space-y-1 py-1">
                     <div className="flex justify-between text-xs text-slate-600 font-semibold font-nepali">
-                      <span>अपलोड हुँदैछ...</span>
+                      <span>{uploadProgress.phase === 'importing' ? 'फिचर आयात हुँदैछ... (पृष्ठभूमिमा जारी छ)' : uploadProgress.phase === 'assembling' ? 'फाइल जोडिँदैछ...' : 'अपलोड हुँदैछ...'}</span>
                       <span className="font-mono text-gov-blue-800 font-bold">{uploadProgress.percent}%</span>
                     </div>
                     <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
