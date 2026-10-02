@@ -87,7 +87,12 @@ The entire system is orchestrated via `docker-compose.yml` comprising 7 isolated
    - TileServer-GL serving raster and vector MBTiles packages with XYZ and TileJSON endpoints.
 
 ### Critical Safety & Runtime Constraints
-- **Storage Volumes are External**: `kmc_gis_server_pg_data`, `kmc_gis_server_redis_data`, `kmc_gis_server_tileserver_data`, and `kmc_gis_server_upload_data` are declared as `external: true`. **NEVER** delete, prune, or run commands that overwrite these volumes.
+- **Layer Data Volumes are External**: `kmc_gis_server_pg_data` (PostGIS), `kmc_gis_server_upload_data` (uploaded files), and `kmc_gis_server_tileserver_data` are declared as `external: true` in `docker-compose.yml`. **`docker compose down -v` will NEVER delete them.** Create them once before the first `up`:
+  - Linux: `bash scripts/create-volumes.sh`
+  - Windows: `scripts\create-volumes.bat`
+  
+  (Safe to re-run; existing volumes are reused, so current data is kept.)
+  To truly wipe all layer data: `docker volume rm kmc_gis_server_pg_data kmc_gis_server_upload_data kmc_gis_server_tileserver_data`.
 - **Docker Execution Boundary**: **NEVER** run `npm`, `bun`, `node`, or `python` directly on the Windows host OS. All builds, tests, migrations, and scripts MUST run inside Docker containers via `docker compose exec` or `docker compose build`.
 
 ---

@@ -18,194 +18,203 @@ from app.config import get_settings
 settings = get_settings()
 
 
+
+
+_SYNC_SQLS = [
+    "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS allow_snapping BOOLEAN DEFAULT TRUE NOT NULL;",
+    "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS fields_config JSONB DEFAULT '[]'::jsonb;",
+    "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS category VARCHAR(100) DEFAULT 'General' NOT NULL;",
+    "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS display_order INTEGER DEFAULT 0 NOT NULL;",
+    "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS published_in_geoportal BOOLEAN DEFAULT TRUE NOT NULL;",
+    "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS default_visible_in_geoportal BOOLEAN DEFAULT FALSE NOT NULL;",
+    "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS opacity DOUBLE PRECISION DEFAULT 1.0 NOT NULL;",
+    "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS role_permissions JSONB DEFAULT '{}'::jsonb;",
+    "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS field_permissions JSONB DEFAULT '{}'::jsonb;",
+    "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS dashboard_config JSONB DEFAULT '{}'::jsonb;",
+    "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS metadata_info JSONB DEFAULT '{}'::jsonb;",
+    "CREATE INDEX IF NOT EXISTS idx_vl_category ON vector_layers(category);",
+    "CREATE INDEX IF NOT EXISTS idx_vl_published ON vector_layers(published_in_geoportal);",
+            "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;",
+            "CREATE INDEX IF NOT EXISTS idx_vl_deleted_at ON vector_layers(deleted_at);",
+            "ALTER TABLE mbtiles_packages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;",
+            "CREATE INDEX IF NOT EXISTS idx_mb_deleted_at ON mbtiles_packages(deleted_at);",
+    "ALTER TABLE mbtiles_packages ALTER COLUMN file_size TYPE BIGINT;",
+    "ALTER TABLE mbtiles_packages ADD COLUMN IF NOT EXISTS center JSONB;",
+    "ALTER TABLE mbtiles_packages ADD COLUMN IF NOT EXISTS category VARCHAR(100) DEFAULT 'Base Maps' NOT NULL;",
+    "ALTER TABLE mbtiles_packages ADD COLUMN IF NOT EXISTS display_order INTEGER DEFAULT 0 NOT NULL;",
+    "ALTER TABLE mbtiles_packages ADD COLUMN IF NOT EXISTS published_in_geoportal BOOLEAN DEFAULT TRUE NOT NULL;",
+    "ALTER TABLE mbtiles_packages ADD COLUMN IF NOT EXISTS default_visible BOOLEAN DEFAULT FALSE NOT NULL;",
+    "ALTER TABLE mbtiles_packages ADD COLUMN IF NOT EXISTS role_permissions JSONB DEFAULT '{}'::jsonb;",
+    "ALTER TABLE media_attachments ALTER COLUMN file_size TYPE BIGINT;",
+    "ALTER TABLE survey_projects ALTER COLUMN boundary TYPE geometry(Geometry, 4326);",
+    "ALTER TABLE task_grids ALTER COLUMN geom TYPE geometry(Geometry, 4326);",
+    "ALTER TABLE task_grids ADD COLUMN IF NOT EXISTS name VARCHAR(255);",
+    "ALTER TABLE task_grids ADD COLUMN IF NOT EXISTS assigned_to INTEGER REFERENCES users(id) ON DELETE SET NULL;",
+    "ALTER TABLE task_grids ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMP;",
+    "ALTER TABLE task_grids ADD COLUMN IF NOT EXISTS assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL;",
+    "ALTER TABLE vector_features ALTER COLUMN properties TYPE JSONB USING properties::jsonb;",
+    "ALTER TABLE task_grids ALTER COLUMN properties TYPE JSONB USING properties::jsonb;",
+    "ALTER TABLE vector_layers ALTER COLUMN role_permissions TYPE JSONB USING role_permissions::jsonb;",
+    "ALTER TABLE vector_layers ALTER COLUMN field_permissions TYPE JSONB USING field_permissions::jsonb;",
+    "ALTER TABLE vector_layers ALTER COLUMN dashboard_config TYPE JSONB USING dashboard_config::jsonb;",
+    "ALTER TABLE vector_layers ALTER COLUMN metadata_info TYPE JSONB USING metadata_info::jsonb;",
+    "ALTER TABLE vector_layers ALTER COLUMN fields_config TYPE JSONB USING fields_config::jsonb;",
+    "ALTER TABLE vector_layers ALTER COLUMN style TYPE JSONB USING style::jsonb;",
+    "ALTER TABLE mbtiles_packages ALTER COLUMN role_permissions TYPE JSONB USING role_permissions::jsonb;",
+    "ALTER TABLE mbtiles_packages ALTER COLUMN bounds TYPE JSONB USING bounds::jsonb;",
+    "ALTER TABLE mbtiles_packages ALTER COLUMN center TYPE JSONB USING center::jsonb;",
+    "ALTER TABLE survey_projects ALTER COLUMN form_schema TYPE JSONB USING form_schema::jsonb;",
+    "ALTER TABLE house_numbers ALTER COLUMN properties TYPE JSONB USING properties::jsonb;",
+    "ALTER TABLE audit_logs ALTER COLUMN details TYPE JSONB USING details::jsonb;",
+    "CREATE INDEX IF NOT EXISTS idx_vf_properties ON vector_features USING gin(properties);",
+    """
+    CREATE TABLE IF NOT EXISTS project_collector_assignments (
+        id SERIAL PRIMARY KEY,
+        project_id INTEGER NOT NULL REFERENCES survey_projects(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        assigned_by INTEGER NOT NULL REFERENCES users(id),
+        assigned_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        CONSTRAINT uq_project_collector UNIQUE (project_id, user_id)
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_pca_project ON project_collector_assignments(project_id);",
+    "CREATE INDEX IF NOT EXISTS idx_pca_user ON project_collector_assignments(user_id);",
+    """
+    CREATE TABLE IF NOT EXISTS collector_live_locations (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+        latitude DOUBLE PRECISION NOT NULL,
+        longitude DOUBLE PRECISION NOT NULL,
+        geom geometry(Point, 4326) NOT NULL,
+        accuracy DOUBLE PRECISION,
+        altitude DOUBLE PRECISION,
+        heading DOUBLE PRECISION,
+        speed DOUBLE PRECISION,
+        battery_level DOUBLE PRECISION,
+        is_online BOOLEAN NOT NULL DEFAULT TRUE,
+        last_seen TIMESTAMP NOT NULL DEFAULT NOW(),
+        app_state VARCHAR(50) DEFAULT 'active',
+        device_info JSONB
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_cll_user ON collector_live_locations(user_id);",
+    "CREATE INDEX IF NOT EXISTS idx_cll_geom ON collector_live_locations USING gist(geom);",
+    """
+    CREATE TABLE IF NOT EXISTS collector_location_logs (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        latitude DOUBLE PRECISION NOT NULL,
+        longitude DOUBLE PRECISION NOT NULL,
+        geom geometry(Point, 4326) NOT NULL,
+        accuracy DOUBLE PRECISION,
+        speed DOUBLE PRECISION,
+        heading DOUBLE PRECISION,
+        timestamp TIMESTAMP NOT NULL DEFAULT NOW()
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_cll_logs_user ON collector_location_logs(user_id);",
+    "CREATE INDEX IF NOT EXISTS idx_cll_logs_time ON collector_location_logs(timestamp);",
+    "CREATE INDEX IF NOT EXISTS idx_cll_logs_geom ON collector_location_logs USING gist(geom);",
+    "ALTER TABLE survey_projects ADD COLUMN IF NOT EXISTS project_mode projectmode DEFAULT 'STANDARD' NOT NULL;",
+    "ALTER TABLE survey_projects ADD COLUMN IF NOT EXISTS geometry_config JSONB DEFAULT '{}'::jsonb;",
+    "ALTER TABLE survey_projects ADD COLUMN IF NOT EXISTS active_questionnaire_id INTEGER REFERENCES questionnaire_definitions(id) ON DELETE SET NULL;",
+    "CREATE INDEX IF NOT EXISTS idx_sp_project_mode ON survey_projects(project_mode);",
+    "CREATE INDEX IF NOT EXISTS idx_qd_project ON questionnaire_definitions(project_id);",
+    "CREATE INDEX IF NOT EXISTS idx_qd_status ON questionnaire_definitions(status);",
+    "CREATE INDEX IF NOT EXISTS idx_qr_project ON questionnaire_responses(project_id);",
+    "CREATE INDEX IF NOT EXISTS idx_qr_questionnaire ON questionnaire_responses(questionnaire_id);",
+    "CREATE INDEX IF NOT EXISTS idx_qr_feature ON questionnaire_responses(feature_id);",
+    "CREATE INDEX IF NOT EXISTS idx_qr_collector ON questionnaire_responses(collector_id);",
+    "CREATE INDEX IF NOT EXISTS idx_qr_status ON questionnaire_responses(status);",
+    "CREATE INDEX IF NOT EXISTS idx_qr_geom ON questionnaire_responses USING gist(geom);",
+]
+
+
 async def init_database():
     """
     Initialize the database safely across multiple uvicorn workers:
-    1. Acquire Postgres advisory lock so only one worker initializes
+    1. Acquire a SESSION-level Postgres advisory lock so exactly ONE worker
+       runs DDL; the other workers block on the lock instead of racing
+       (this eliminates the duplicate-key ERROR spam on CREATE EXTENSION /
+       CREATE TYPE / CREATE INDEX during startup)
     2. Create extensions
-    3. Safely update enums
+    3. Safely create/expand enums
     4. Create all tables from ORM metadata
     5. Sync schema columns & indexes
-    6. Seed default superuser and platform modules
+    6. Seed default superuser and platform modules (idempotent)
     """
-    # Step 1: Extensions & Pre-existing Enum Expansions (Outside transaction with AUTOCOMMIT)
     async with engine.connect() as conn:
         conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
-        
-        # Extensions
-        extensions = ["postgis", "postgis_topology", "pg_trgm", '"uuid-ossp"']
-        for ext in extensions:
+        # Session-level lock: concurrent workers WAIT here until init finishes.
+        # (pg_advisory_xact_lock cannot be used: AUTOCOMMIT has no surrounding
+        # transaction, so the session lock is released explicitly in `finally`.)
+        await conn.execute(text("SELECT pg_advisory_lock(847291);"))
+        try:
+            # ---- Step 1: Extensions (serialized — no more races) ----
+            for ext in ["postgis", "postgis_topology", "pg_trgm", '"uuid-ossp"']:
+                try:
+                    await conn.execute(text(f"CREATE EXTENSION IF NOT EXISTS {ext};"))
+                except Exception:
+                    pass
+
+            # ---- Step 2: enums (serialized — no more races) ----
+            await _ensure_enums(conn)
+
+            # ---- Step 3: Create all tables from ORM metadata ----
+            await conn.run_sync(Base.metadata.create_all)
+
+            # ---- Step 4: schema sync for existing databases ----
+            for sql in _SYNC_SQLS:
+                try:
+                    await conn.execute(text(sql))
+                except Exception:
+                    pass
+        finally:
             try:
-                await conn.execute(text(f"CREATE EXTENSION IF NOT EXISTS {ext};"))
+                await conn.execute(text("SELECT pg_advisory_unlock(847291);"))
             except Exception:
                 pass
 
-        # Check if userrole type exists on pre-existing database before ALTER TYPE
+    # ---- Step 5: seeding / backfills (idempotent, race-tolerant) ----
+    await seed_superuser()
+    await seed_platform_modules()
+    await backfill_mbtiles_centers()
+    await auto_register_existing_mbtiles()
+    await sync_tileserver_config()
+
+
+async def _ensure_enums(conn):
+    """Create or expand enum types. Must run under the init advisory lock."""
+    try:
+        type_check = await conn.execute(text("SELECT 1 FROM pg_type WHERE typname = 'userrole';"))
+        if type_check.scalar_one_or_none():
+            for role_val in ["SuperAdmin", "MunicipalUser", "BasicViewer"]:
+                try:
+                    await conn.execute(text(f"ALTER TYPE userrole ADD VALUE IF NOT EXISTS '{role_val}';"))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    new_enums = [
+        ("projectmode", ["STANDARD", "ADVANCED_QUESTIONNAIRE"]),
+        ("questionnairestatus", ["DRAFT", "PUBLISHED", "ARCHIVED"]),
+        ("responselifecyclestatus", ["DRAFT", "IN_PROGRESS", "COMPLETED", "SUBMITTED", "UNDER_REVIEW", "RETURNED", "APPROVED"]),
+    ]
+    for enum_name, enum_vals in new_enums:
         try:
-            type_check = await conn.execute(text("SELECT 1 FROM pg_type WHERE typname = 'userrole';"))
-            if type_check.scalar_one_or_none():
-                for role_val in ["SuperAdmin", "MunicipalUser", "BasicViewer"]:
+            tc = await conn.execute(text(f"SELECT 1 FROM pg_type WHERE typname = '{enum_name}';"))
+            if not tc.scalar_one_or_none():
+                val_str = ", ".join(f"'{v}'" for v in enum_vals)
+                await conn.execute(text(f"CREATE TYPE {enum_name} AS ENUM ({val_str});"))
+            else:
+                for v in enum_vals:
                     try:
-                        await conn.execute(text(f"ALTER TYPE userrole ADD VALUE IF NOT EXISTS '{role_val}';"))
+                        await conn.execute(text(f"ALTER TYPE {enum_name} ADD VALUE IF NOT EXISTS '{v}';"))
                     except Exception:
                         pass
         except Exception:
             pass
-
-        # Create or update projectmode, questionnairestatus, responselifecyclestatus enums
-        new_enums = [
-            ("projectmode", ["STANDARD", "ADVANCED_QUESTIONNAIRE"]),
-            ("questionnairestatus", ["DRAFT", "PUBLISHED", "ARCHIVED"]),
-            ("responselifecyclestatus", ["DRAFT", "IN_PROGRESS", "COMPLETED", "SUBMITTED", "UNDER_REVIEW", "RETURNED", "APPROVED"]),
-        ]
-        for enum_name, enum_vals in new_enums:
-            try:
-                tc = await conn.execute(text(f"SELECT 1 FROM pg_type WHERE typname = '{enum_name}';"))
-                if not tc.scalar_one_or_none():
-                    val_str = ", ".join(f"'{v}'" for v in enum_vals)
-                    await conn.execute(text(f"CREATE TYPE {enum_name} AS ENUM ({val_str});"))
-                else:
-                    for v in enum_vals:
-                        try:
-                            await conn.execute(text(f"ALTER TYPE {enum_name} ADD VALUE IF NOT EXISTS '{v}';"))
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-    # Step 2: Create All Tables from ORM Metadata (with Advisory Lock)
-    async with engine.begin() as conn:
-        await conn.execute(text("SELECT pg_advisory_xact_lock(847291);"))
-        await conn.run_sync(Base.metadata.create_all)
-
-    # Step 3: Safe schema synchronization for existing databases (AUTOCOMMIT)
-    async with engine.connect() as conn:
-        conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
-        sync_sqls = [
-            "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS allow_snapping BOOLEAN DEFAULT TRUE NOT NULL;",
-            "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS fields_config JSONB DEFAULT '[]'::jsonb;",
-            "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS category VARCHAR(100) DEFAULT 'General' NOT NULL;",
-            "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS display_order INTEGER DEFAULT 0 NOT NULL;",
-            "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS published_in_geoportal BOOLEAN DEFAULT TRUE NOT NULL;",
-            "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS default_visible_in_geoportal BOOLEAN DEFAULT FALSE NOT NULL;",
-            "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS opacity DOUBLE PRECISION DEFAULT 1.0 NOT NULL;",
-            "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS role_permissions JSONB DEFAULT '{}'::jsonb;",
-            "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS field_permissions JSONB DEFAULT '{}'::jsonb;",
-            "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS dashboard_config JSONB DEFAULT '{}'::jsonb;",
-            "ALTER TABLE vector_layers ADD COLUMN IF NOT EXISTS metadata_info JSONB DEFAULT '{}'::jsonb;",
-            "CREATE INDEX IF NOT EXISTS idx_vl_category ON vector_layers(category);",
-            "CREATE INDEX IF NOT EXISTS idx_vl_published ON vector_layers(published_in_geoportal);",
-            "ALTER TABLE mbtiles_packages ALTER COLUMN file_size TYPE BIGINT;",
-            "ALTER TABLE mbtiles_packages ADD COLUMN IF NOT EXISTS center JSONB;",
-            "ALTER TABLE mbtiles_packages ADD COLUMN IF NOT EXISTS category VARCHAR(100) DEFAULT 'Base Maps' NOT NULL;",
-            "ALTER TABLE mbtiles_packages ADD COLUMN IF NOT EXISTS display_order INTEGER DEFAULT 0 NOT NULL;",
-            "ALTER TABLE mbtiles_packages ADD COLUMN IF NOT EXISTS published_in_geoportal BOOLEAN DEFAULT TRUE NOT NULL;",
-            "ALTER TABLE mbtiles_packages ADD COLUMN IF NOT EXISTS default_visible BOOLEAN DEFAULT FALSE NOT NULL;",
-            "ALTER TABLE mbtiles_packages ADD COLUMN IF NOT EXISTS role_permissions JSONB DEFAULT '{}'::jsonb;",
-            "ALTER TABLE media_attachments ALTER COLUMN file_size TYPE BIGINT;",
-            "ALTER TABLE survey_projects ALTER COLUMN boundary TYPE geometry(Geometry, 4326);",
-            "ALTER TABLE task_grids ALTER COLUMN geom TYPE geometry(Geometry, 4326);",
-            "ALTER TABLE task_grids ADD COLUMN IF NOT EXISTS name VARCHAR(255);",
-            "ALTER TABLE task_grids ADD COLUMN IF NOT EXISTS assigned_to INTEGER REFERENCES users(id) ON DELETE SET NULL;",
-            "ALTER TABLE task_grids ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMP;",
-            "ALTER TABLE task_grids ADD COLUMN IF NOT EXISTS assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL;",
-            "ALTER TABLE vector_features ALTER COLUMN properties TYPE JSONB USING properties::jsonb;",
-            "ALTER TABLE task_grids ALTER COLUMN properties TYPE JSONB USING properties::jsonb;",
-            "ALTER TABLE vector_layers ALTER COLUMN role_permissions TYPE JSONB USING role_permissions::jsonb;",
-            "ALTER TABLE vector_layers ALTER COLUMN field_permissions TYPE JSONB USING field_permissions::jsonb;",
-            "ALTER TABLE vector_layers ALTER COLUMN dashboard_config TYPE JSONB USING dashboard_config::jsonb;",
-            "ALTER TABLE vector_layers ALTER COLUMN metadata_info TYPE JSONB USING metadata_info::jsonb;",
-            "ALTER TABLE vector_layers ALTER COLUMN fields_config TYPE JSONB USING fields_config::jsonb;",
-            "ALTER TABLE vector_layers ALTER COLUMN style TYPE JSONB USING style::jsonb;",
-            "ALTER TABLE mbtiles_packages ALTER COLUMN role_permissions TYPE JSONB USING role_permissions::jsonb;",
-            "ALTER TABLE mbtiles_packages ALTER COLUMN bounds TYPE JSONB USING bounds::jsonb;",
-            "ALTER TABLE mbtiles_packages ALTER COLUMN center TYPE JSONB USING center::jsonb;",
-            "ALTER TABLE survey_projects ALTER COLUMN form_schema TYPE JSONB USING form_schema::jsonb;",
-            "ALTER TABLE house_numbers ALTER COLUMN properties TYPE JSONB USING properties::jsonb;",
-            "ALTER TABLE audit_logs ALTER COLUMN details TYPE JSONB USING details::jsonb;",
-            "CREATE INDEX IF NOT EXISTS idx_vf_properties ON vector_features USING gin(properties);",
-            """
-            CREATE TABLE IF NOT EXISTS project_collector_assignments (
-                id SERIAL PRIMARY KEY,
-                project_id INTEGER NOT NULL REFERENCES survey_projects(id) ON DELETE CASCADE,
-                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                assigned_by INTEGER NOT NULL REFERENCES users(id),
-                assigned_at TIMESTAMP NOT NULL DEFAULT NOW(),
-                CONSTRAINT uq_project_collector UNIQUE (project_id, user_id)
-            );
-            """,
-            "CREATE INDEX IF NOT EXISTS idx_pca_project ON project_collector_assignments(project_id);",
-            "CREATE INDEX IF NOT EXISTS idx_pca_user ON project_collector_assignments(user_id);",
-            """
-            CREATE TABLE IF NOT EXISTS collector_live_locations (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
-                latitude DOUBLE PRECISION NOT NULL,
-                longitude DOUBLE PRECISION NOT NULL,
-                geom geometry(Point, 4326) NOT NULL,
-                accuracy DOUBLE PRECISION,
-                altitude DOUBLE PRECISION,
-                heading DOUBLE PRECISION,
-                speed DOUBLE PRECISION,
-                battery_level DOUBLE PRECISION,
-                is_online BOOLEAN NOT NULL DEFAULT TRUE,
-                last_seen TIMESTAMP NOT NULL DEFAULT NOW(),
-                app_state VARCHAR(50) DEFAULT 'active',
-                device_info JSONB
-            );
-            """,
-            "CREATE INDEX IF NOT EXISTS idx_cll_user ON collector_live_locations(user_id);",
-            "CREATE INDEX IF NOT EXISTS idx_cll_geom ON collector_live_locations USING gist(geom);",
-            """
-            CREATE TABLE IF NOT EXISTS collector_location_logs (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                latitude DOUBLE PRECISION NOT NULL,
-                longitude DOUBLE PRECISION NOT NULL,
-                geom geometry(Point, 4326) NOT NULL,
-                accuracy DOUBLE PRECISION,
-                speed DOUBLE PRECISION,
-                heading DOUBLE PRECISION,
-                timestamp TIMESTAMP NOT NULL DEFAULT NOW()
-            );
-            """,
-            "CREATE INDEX IF NOT EXISTS idx_cll_logs_user ON collector_location_logs(user_id);",
-            "CREATE INDEX IF NOT EXISTS idx_cll_logs_time ON collector_location_logs(timestamp);",
-            "CREATE INDEX IF NOT EXISTS idx_cll_logs_geom ON collector_location_logs USING gist(geom);",
-            "ALTER TABLE survey_projects ADD COLUMN IF NOT EXISTS project_mode projectmode DEFAULT 'STANDARD' NOT NULL;",
-            "ALTER TABLE survey_projects ADD COLUMN IF NOT EXISTS geometry_config JSONB DEFAULT '{}'::jsonb;",
-            "ALTER TABLE survey_projects ADD COLUMN IF NOT EXISTS active_questionnaire_id INTEGER REFERENCES questionnaire_definitions(id) ON DELETE SET NULL;",
-            "CREATE INDEX IF NOT EXISTS idx_sp_project_mode ON survey_projects(project_mode);",
-            "CREATE INDEX IF NOT EXISTS idx_qd_project ON questionnaire_definitions(project_id);",
-            "CREATE INDEX IF NOT EXISTS idx_qd_status ON questionnaire_definitions(status);",
-            "CREATE INDEX IF NOT EXISTS idx_qr_project ON questionnaire_responses(project_id);",
-            "CREATE INDEX IF NOT EXISTS idx_qr_questionnaire ON questionnaire_responses(questionnaire_id);",
-            "CREATE INDEX IF NOT EXISTS idx_qr_feature ON questionnaire_responses(feature_id);",
-            "CREATE INDEX IF NOT EXISTS idx_qr_collector ON questionnaire_responses(collector_id);",
-            "CREATE INDEX IF NOT EXISTS idx_qr_status ON questionnaire_responses(status);",
-            "CREATE INDEX IF NOT EXISTS idx_qr_geom ON questionnaire_responses USING gist(geom);",
-        ]
-        for sql in sync_sqls:
-            try:
-                await conn.execute(text(sql))
-            except Exception:
-                pass
-
-    # Seed superuser
-    await seed_superuser()
-
-    # Seed platform modules
-    await seed_platform_modules()
-
-    # Backfill MBTiles center metadata for existing packages
-    await backfill_mbtiles_centers()
-
-    # Auto-register any existing MBTiles packages sitting in storage
-    await auto_register_existing_mbtiles()
-
-    # Synchronize TileServer configuration with database MBTiles packages
-    await sync_tileserver_config()
-
 
 async def seed_platform_modules():
     """Seed the default platform modules if not present."""
@@ -398,5 +407,4 @@ async def auto_register_existing_mbtiles():
         except Exception as e:
             await db.rollback()
             print(f"[INIT] MBTiles auto-registration handled: {e}")
-
 

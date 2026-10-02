@@ -5,6 +5,7 @@ Vector layer CRUD, file upload, and download (GeoJSON, Shapefile, KML, CSV).
 
 import re
 import json
+from datetime import datetime, timezone
 from typing import Optional, List, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request, UploadFile, File, Form, Query, Body
@@ -113,7 +114,8 @@ async def create_layer(
         feature_count=0, fields_config=layer.fields_config or [],
         creation_geometry_types=layer.creation_geometry_types or [layer.geometry_type.value],
         geometry_fields_config=layer.geometry_fields_config or {},
-        created_at=layer.created_at,
+        deleted_at=layer.deleted_at,
+            created_at=layer.created_at,
     )
 
 
@@ -148,9 +150,9 @@ async def list_global_layers(
                 VectorLayer.id.in_(assigned_ids) if assigned_ids else False,
                 and_(VectorLayer.project_id.in_(target_pids), VectorLayer.is_global == False),
             )
-        ).order_by(VectorLayer.created_at.desc())
+        ).where(VectorLayer.deleted_at.is_(None)).order_by(VectorLayer.created_at.desc())
     else:
-        query = select(VectorLayer)
+        query = select(VectorLayer).where(VectorLayer.deleted_at.is_(None))
         if project_id is not None:
             assigned_result = await db.execute(
                 select(ProjectLayerAssignment.layer_id)
@@ -199,6 +201,7 @@ async def list_global_layers(
             feature_count=count, fields_config=fields,
             creation_geometry_types=layer.creation_geometry_types if (layer.creation_geometry_types and len(layer.creation_geometry_types) > 0) else [layer.geometry_type.value],
             geometry_fields_config=layer.geometry_fields_config or {},
+            deleted_at=layer.deleted_at,
             created_at=layer.created_at,
         ))
     return responses
@@ -259,6 +262,7 @@ async def list_project_layers(
             feature_count=count, fields_config=fields,
             creation_geometry_types=layer.creation_geometry_types if (layer.creation_geometry_types and len(layer.creation_geometry_types) > 0) else [layer.geometry_type.value],
             geometry_fields_config=layer.geometry_fields_config or {},
+            deleted_at=layer.deleted_at,
             created_at=layer.created_at,
         ))
     return responses
@@ -302,7 +306,8 @@ async def create_project_layer(
         feature_count=0, fields_config=layer.fields_config or [],
         creation_geometry_types=layer.creation_geometry_types or [layer.geometry_type.value],
         geometry_fields_config=layer.geometry_fields_config or {},
-        created_at=layer.created_at,
+        deleted_at=layer.deleted_at,
+            created_at=layer.created_at,
     )
 
 
@@ -314,7 +319,7 @@ async def update_layer(
     admin: User = Depends(require_role(UserRole.GisAdmin)),
 ):
     """Update a vector layer (GisAdmin only)."""
-    result = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id))
+    result = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id, VectorLayer.deleted_at.is_(None)))
     layer = result.scalar_one_or_none()
     if not layer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")
@@ -338,8 +343,61 @@ async def update_layer(
         feature_count=count, fields_config=fields,
         creation_geometry_types=layer.creation_geometry_types if (layer.creation_geometry_types and len(layer.creation_geometry_types) > 0) else [layer.geometry_type.value],
         geometry_fields_config=layer.geometry_fields_config or {},
-        created_at=layer.created_at,
+        deleted_at=layer.deleted_at,
+            created_at=layer.created_at,
     )
+
+
+@router.get("/layers/deleted", response_model=List[LayerResponse])
+async def list_deleted_layers(
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_role(UserRole.GisAdmin)),
+):
+    """Recycle bin: list soft-deleted vector layers (GisAdmin only)."""
+    result = await db.execute(
+        select(VectorLayer)
+        .where(VectorLayer.deleted_at.is_not(None))
+        .order_by(VectorLayer.deleted_at.desc())
+    )
+    layers = result.scalars().all()
+    responses = []
+    for layer in layers:
+        count_result = await db.execute(
+            select(func.count(VectorFeature.id)).where(VectorFeature.layer_id == layer.id)
+        )
+        count = count_result.scalar() or 0
+        responses.append(LayerResponse(
+            id=layer.id, name=layer.name, description=layer.description,
+            geometry_type=layer.geometry_type.value, style=layer.style,
+            editable_by_collectors=layer.editable_by_collectors,
+            allow_snapping=layer.allow_snapping,
+            is_global=layer.is_global, project_id=layer.project_id,
+            category=getattr(layer, 'category', 'General') or 'General',
+            feature_count=count, fields_config=layer.fields_config or [],
+            creation_geometry_types=layer.creation_geometry_types or [layer.geometry_type.value],
+            geometry_fields_config=layer.geometry_fields_config or {},
+            deleted_at=layer.deleted_at,
+            created_at=layer.created_at,
+        ))
+    return responses
+
+
+@router.post("/layers/{layer_id}/restore", response_model=MessageResponse)
+async def restore_layer(
+    layer_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_role(UserRole.GisAdmin)),
+):
+    """Restore a soft-deleted vector layer from the recycle bin (GisAdmin only)."""
+    result = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id, VectorLayer.deleted_at.is_(None)))
+    layer = result.scalar_one_or_none()
+    if not layer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")
+    if layer.deleted_at is None:
+        return MessageResponse(message=f"Layer '{layer.name}' is not deleted")
+    layer.deleted_at = None
+    await invalidate_layer_cache(layer.id)
+    return MessageResponse(message=f"Layer '{layer.name}' restored from recycle bin")
 
 
 @router.delete("/layers/{layer_id}", response_model=MessageResponse)
@@ -348,17 +406,47 @@ async def delete_layer(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_role(UserRole.GisAdmin)),
 ):
-    """Delete a vector layer and all its features (GisAdmin only)."""
-    result = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id))
+    """Soft-delete a vector layer → moves it to the recycle bin (GisAdmin only).
+    Features are kept so the layer can be restored. Permanent deletion happens
+    via DELETE /layers/{layer_id}/permanent."""
+    result = await db.execute(
+        select(VectorLayer).where(
+            VectorLayer.id == layer_id,
+            VectorLayer.deleted_at.is_(None),
+        )
+    )
     layer = result.scalar_one_or_none()
     if not layer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")
+
+    layer.deleted_at = datetime.now(timezone.utc)
+    await invalidate_layer_cache(layer.id)
+    return MessageResponse(message=f"Layer '{layer.name}' moved to recycle bin")
+
+
+@router.delete("/layers/{layer_id}/permanent", response_model=MessageResponse)
+async def permanent_delete_layer(
+    layer_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_role(UserRole.GisAdmin)),
+):
+    """Permanently delete a vector layer and all its features (GisAdmin only).
+    Only allowed from the recycle bin — this cannot be undone."""
+    result = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id, VectorLayer.deleted_at.is_(None)))
+    layer = result.scalar_one_or_none()
+    if not layer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")
+    if layer.deleted_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Layer must be moved to the recycle bin first",
+        )
 
     lid = layer.id
     name = layer.name
     await db.delete(layer)
     await invalidate_layer_cache(lid)
-    return MessageResponse(message=f"Layer '{name}' deleted")
+    return MessageResponse(message=f"Layer '{name}' permanently deleted")
 
 
 @router.get("/layers/{layer_id}/fields")
@@ -369,7 +457,7 @@ async def get_layer_fields(
     current_user: User = Depends(get_current_user),
 ):
     """Get vector layer field schema, creation geometry types, and geometry-specific field configs."""
-    result = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id))
+    result = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id, VectorLayer.deleted_at.is_(None)))
     layer = result.scalar_one_or_none()
     if not layer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")
@@ -392,7 +480,7 @@ async def update_layer_fields(
     admin: User = Depends(require_role(UserRole.GisAdmin)),
 ):
     """Configure vector layer fields, unique identifiers, creation geometry types, and compulsory flags (GisAdmin only)."""
-    result = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id))
+    result = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id, VectorLayer.deleted_at.is_(None)))
     layer = result.scalar_one_or_none()
     if not layer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")
@@ -447,7 +535,7 @@ async def get_next_feature_id(
     """
     Generate the next sequential unique identifier for a vector layer based on admin-defined sequence rule.
     """
-    result = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id))
+    result = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id, VectorLayer.deleted_at.is_(None)))
     layer = result.scalar_one_or_none()
     if not layer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")
@@ -539,7 +627,7 @@ async def download_vector_layer(
             detail="Access denied. You do not have access to this layer.",
         )
 
-    result = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id))
+    result = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id, VectorLayer.deleted_at.is_(None)))
     layer = result.scalar_one_or_none()
     if not layer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")
@@ -817,5 +905,6 @@ async def upload_vector_layer(
         allow_snapping=layer.allow_snapping,
         is_global=layer.is_global, project_id=layer.project_id,
         feature_count=valid_count, fields_config=layer.fields_config or [],
-        created_at=layer.created_at,
+        deleted_at=layer.deleted_at,
+            created_at=layer.created_at,
     )

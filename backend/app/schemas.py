@@ -224,6 +224,7 @@ class LayerResponse(BaseModel):
     fields_config: Optional[List[Dict[str, Any]]] = None
     creation_geometry_types: Optional[List[str]] = None
     geometry_fields_config: Optional[Dict[str, Any]] = None
+    deleted_at: Optional[datetime] = None
     created_at: datetime
 
 
@@ -381,6 +382,7 @@ class MBTilesResponse(BaseModel):
     is_global: bool
     project_id: Optional[int]
     project_name: Optional[str] = None
+    deleted_at: Optional[datetime] = None
     created_at: datetime
 
 

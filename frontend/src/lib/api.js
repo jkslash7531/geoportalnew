@@ -168,6 +168,9 @@ export const layersAPI = {
   createProject: (projectId, data) => api.post(`/projects/${projectId}/layers`, data),
   update: (id, data) => api.put(`/layers/${id}`, data),
   delete: (id) => api.delete(`/layers/${id}`),
+  getDeleted: () => api.get('/layers/deleted'),
+  restore: (id) => api.post(`/layers/${id}/restore`),
+  permanentDelete: (id) => api.delete(`/layers/${id}/permanent`),
   download: (layerId, format = 'geojson') =>
     api.get(`/layers/${layerId}/download`, {
       params: { format },
@@ -229,6 +232,9 @@ export const tilesAPI = {
     onUploadProgress,
   }),
   delete: (id) => api.delete(`/tiles/${id}`),
+  getDeleted: () => api.get('/tiles/deleted'),
+  restore: (id) => api.post(`/tiles/${id}/restore`),
+  permanentDelete: (id) => api.delete(`/tiles/${id}/permanent`),
 };
 
 // ---- Media API ----

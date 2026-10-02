@@ -32,7 +32,7 @@ async def get_layer_analytics(
     and analyzes dynamic attribute distributions. Uses Redis caching.
     """
     # 1. Fetch layer
-    res = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id))
+    res = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id, VectorLayer.deleted_at.is_(None)))
     layer = res.scalar_one_or_none()
     if not layer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")
