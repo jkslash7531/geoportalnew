@@ -78,6 +78,9 @@ docker-compose.override.yaml
 uploads/
 /tileserver-data/
 
+# ---- Docker data (bind mounts — never commit local DB/uploads) ----
+data/
+
 # ---- Scratch / Test Scripts ----
 scratch/
 

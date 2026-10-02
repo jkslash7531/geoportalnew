@@ -87,12 +87,8 @@ The entire system is orchestrated via `docker-compose.yml` comprising 7 isolated
    - TileServer-GL serving raster and vector MBTiles packages with XYZ and TileJSON endpoints.
 
 ### Critical Safety & Runtime Constraints
-- **Layer Data Volumes are External**: `kmc_gis_server_pg_data` (PostGIS), `kmc_gis_server_upload_data` (uploaded files), and `kmc_gis_server_tileserver_data` are declared as `external: true` in `docker-compose.yml`. **`docker compose down -v` will NEVER delete them.** Create them once before the first `up`:
-  - Linux: `bash scripts/create-volumes.sh`
-  - Windows: `scripts\create-volumes.bat`
-  
-  (Safe to re-run; existing volumes are reused, so current data is kept.)
-  To truly wipe all layer data: `docker volume rm kmc_gis_server_pg_data kmc_gis_server_upload_data kmc_gis_server_tileserver_data`.
+- **Layer Data is Bind-Mounted**: PostGIS (`./data/postgres`), uploads (`./data/uploads`), and tiles (`./data/tileserver`) are bind mounts created automatically by `docker compose up --build`. **`docker compose down -v` can NEVER delete them** — no extra commands needed, `up --build` is the entire setup. To truly wipe all layer data, stop the stack and delete the `./data` directory.
+  - *Upgrading from the old named volumes?* Copy data once, then remove the old volumes: `docker run --rm -v kmc_gis_server_pg_data:/from -v "%cd%/data/postgres:/to" alpine sh -c "cp -a /from/. /to/"` (repeat for `upload_data`→`./data/uploads`, `tileserver_data`→`./data/tileserver`), then `docker volume rm kmc_gis_server_pg_data kmc_gis_server_upload_data kmc_gis_server_tileserver_data`.
 - **Docker Execution Boundary**: **NEVER** run `npm`, `bun`, `node`, or `python` directly on the Windows host OS. All builds, tests, migrations, and scripts MUST run inside Docker containers via `docker compose exec` or `docker compose build`.
 
 ---
