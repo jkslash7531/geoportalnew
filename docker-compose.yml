@@ -13,7 +13,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-kmc_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-KmcP0stGr3s!Secure2024}
     volumes:
-      - pg_data:/var/lib/postgresql/data
+      # Bind mount: auto-created by `up`; `down -v` can NEVER delete it.
+      - ./data/postgres:/var/lib/postgresql/data
     networks:
       - kmc_net
     healthcheck:
@@ -52,7 +53,7 @@ services:
     container_name: kmc_server_tileserver
     restart: unless-stopped
     volumes:
-      - tileserver_data:/data
+      - ./data/tileserver:/data
     networks:
       - kmc_net
     healthcheck:
@@ -95,8 +96,8 @@ services:
       - TMPDIR=/tileserver-data/temp
     volumes:
       - ./backend/app:/app/app
-      - tileserver_data:/tileserver-data
-      - upload_data:/app/uploads
+      - ./data/tileserver:/tileserver-data
+      - ./data/uploads:/app/uploads
     depends_on:
       postgres:
         condition: service_healthy
@@ -193,22 +194,13 @@ services:
 
 volumes:
   # ------------------------------------------------------------------
-  # DATA VOLUMES ARE EXTERNAL: they are NOT created or deleted by Compose.
-  # `docker compose down -v` will NEVER delete uploaded layers or the
-  # PostGIS database. Create them once with scripts/create-volumes.sh
-  # (Linux) or scripts/create-volumes.bat (Windows), then `up` just works.
-  # To truly wipe all data: docker volume rm kmc_gis_server_pg_data \
-  #   kmc_gis_server_upload_data kmc_gis_server_tileserver_data
+  # Layer data lives in ./data/ BIND MOUNTS (auto-created by `up`).
+  # `docker compose down -v` only removes containers/networks/images and
+  # managed volumes — it NEVER touches bind-mounted host directories, so
+  # uploaded layers and the PostGIS database always survive. No extra
+  # commands needed: plain `docker compose up --build` is the whole setup.
+  # To truly wipe all data: delete the ./data directory while stopped.
   # ------------------------------------------------------------------
-  pg_data:
-    external: true
-    name: kmc_gis_server_pg_data
-  upload_data:
-    external: true
-    name: kmc_gis_server_upload_data
-  tileserver_data:
-    external: true
-    name: kmc_gis_server_tileserver_data
   # Ephemeral cache only — safe for Compose to manage and wipe.
   redis_data:
     name: kmc_gis_server_redis_data
