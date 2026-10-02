@@ -229,6 +229,7 @@ class LayerResponse(BaseModel):
     import_error: Optional[str] = None
     import_total: Optional[int] = 0
     import_count: Optional[int] = 0
+    import_phase: Optional[str] = None
     created_at: datetime
 
 

@@ -220,6 +220,8 @@ class VectorLayer(Base):
     import_error = Column(Text, nullable=True)
     import_total = Column(Integer, default=0, nullable=False)
     import_count = Column(Integer, default=0, nullable=False)
+    # Human-readable progress note while importing (e.g. "ogr2ogr 45%").
+    import_phase = Column(Text, nullable=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

@@ -266,7 +266,7 @@ export default function AdminPanel({
               loaded: done,
               total,
               phase: 'importing',
-              label: total > 0 ? `${done.toLocaleString()} / ${total.toLocaleString()} फिचर` : 'फिचर आयात हुँदैछ...',
+              label: layer.import_phase || (total > 0 ? `${done.toLocaleString()} / ${total.toLocaleString()} फिचर` : 'फिचर आयात हुँदैछ...'),
             };
           });
           if (Date.now() > deadline) {

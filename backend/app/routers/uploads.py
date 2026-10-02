@@ -501,6 +501,43 @@ _PG_NUMERIC = {"integer", "bigint", "smallint", "double precision", "numeric", "
 # separately and reports progress; 500k is a good throughput/progress mix.
 INSERT_BATCH_SIZE = 500_000
 
+# Hard cap for the ogr2ogr staging phase.
+OGR2OGR_TIMEOUT_SECONDS = 6 * 3600
+
+
+def _geojson_already_4326(path: str) -> bool:
+    """
+    True when a .geojson/.json file has no top-level "crs" member.
+
+    Per RFC 7946 the CRS of GeoJSON without a "crs" member is WGS 84, so the
+    -t_srs EPSG:4326 reprojection would be a no-op — skipping it saves a
+    per-vertex transform over millions of coordinates. The check reads only
+    the first 64KB (a top-level "crs" always sits near the start of the file);
+    any doubt -> False (keep the reprojection, just slower).
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(65536)
+        if b'"crs"' in head:
+            return False
+        return head.lstrip().startswith(b"{")
+    except Exception:
+        return False
+
+
+def _set_import_phase(engine, layer_id: int, phase: Optional[str]) -> None:
+    """Best-effort progress note update (surfaces in the UI while importing)."""
+    try:
+        from sqlalchemy import text as sql_text
+
+        with engine.begin() as conn:
+            conn.execute(
+                sql_text("UPDATE vector_layers SET import_phase=:p WHERE id=:lid"),
+                {"p": phase, "lid": layer_id},
+            )
+    except Exception:
+        pass
+
 
 def _run_vector_import(layer_id: int, src_path: str, staging: str, created_by: int) -> None:
     """
@@ -524,7 +561,7 @@ def _run_vector_import(layer_id: int, src_path: str, staging: str, created_by: i
                 conn.execute(
                     sql_text(
                         "UPDATE vector_layers SET import_status='failed', "
-                        "import_error=:msg WHERE id=:lid"
+                        "import_error=:msg, import_phase=NULL WHERE id=:lid"
                     ),
                     {"msg": msg[:2000], "lid": layer_id},
                 )
@@ -548,18 +585,74 @@ def _run_vector_import(layer_id: int, src_path: str, staging: str, created_by: i
             f"PG:host={s.POSTGRES_HOST} port={s.POSTGRES_PORT} "
             f"dbname={s.POSTGRES_DB} user={s.POSTGRES_USER}"
         )
+        ext = os.path.splitext(src_path)[1].lower()
         cmd = [
             "ogr2ogr", "-f", "PostgreSQL", pg_conn, src_path,
             "-nln", staging,
-            "-t_srs", "EPSG:4326",          # reproject in C, not per-feature Python
+            # NOTE: no -t_srs when the GeoJSON is already WGS84 (checked
+            # below) — a 4326->4326 "reprojection" still costs a per-vertex
+            # transform over millions of coordinates.
             "-lco", "GEOMETRY_NAME=geom",
             "-lco", "FID=ogc_fid",
+            # No spatial index on the staging table: ogr2ogr would otherwise
+            # maintain a GIST index row-by-row during the COPY, and we drop
+            # the staging table right after the import anyway.
+            "-lco", "SPATIAL_INDEX=NONE",
             "--config", "PG_USE_COPY", "YES",  # COPY protocol, not row inserts
+            "-progress",  # lets us report live % while the import runs
         ]
-        proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=6 * 3600)
+        if not (ext in (".geojson", ".json") and _geojson_already_4326(src_path)):
+            cmd[7:7] = ["-t_srs", "EPSG:4326"]
+
+        # Stream stderr to a file: keeps unbounded warning output out of RAM
+        # and lets us parse the -progress percentages while it runs.
+        parts_dir = Path(src_path).parent / ".parts"
+        parts_dir.mkdir(parents=True, exist_ok=True)
+        err_log = parts_dir / f"ogr2ogr-{layer_id}.log"
+        _set_import_phase(engine, layer_id, "ogr2ogr सुरु हुँदैछ...")
+        proc = subprocess.Popen(
+            cmd, env=env, stdout=subprocess.DEVNULL,
+            stderr=open(err_log, "w", errors="replace"),
+        )
+        deadline = time.time() + OGR2OGR_TIMEOUT_SECONDS
+        last_reported = -1
+        last_db_update = 0.0
+        err_tail = ""
+        while True:
+            rc = proc.poll()
+            try:
+                with open(err_log, errors="replace") as ef:
+                    ef.seek(max(0, os.path.getsize(err_log) - 4000))
+                    tail = ef.read()
+            except Exception:
+                tail = ""
+            nums = re.findall(r"(\d+)\.\.\.", tail)
+            pct = int(nums[-1]) if nums else 0
+            now_t = time.time()
+            if pct != last_reported and now_t - last_db_update > 10:
+                last_reported = pct
+                last_db_update = now_t
+                _set_import_phase(engine, layer_id, f"ogr2ogr {pct}%")
+                print(f"{log_prefix} ogr2ogr {pct}%")
+            if rc is not None:
+                err_tail = tail[-1500:]
+                break
+            if now_t > deadline:
+                proc.kill()
+                _set_import_phase(engine, layer_id, None)
+                _fail("ogr2ogr timed out after 6 hours")
+                return
+            time.sleep(5)
+        try:
+            if err_log.exists():
+                err_log.unlink()
+        except Exception:
+            pass
         if proc.returncode != 0:
-            _fail(f"ogr2ogr failed: {(proc.stderr or proc.stdout)[-1500:]}")
+            _set_import_phase(engine, layer_id, None)
+            _fail(f"ogr2ogr failed (exit {proc.returncode}): {err_tail}")
             return
+        _set_import_phase(engine, layer_id, "डेटाबेसमा सारिँदैछ...")
 
         with engine.begin() as conn:
             # Dominant geometry type -> layer.geometry_type
@@ -624,6 +717,7 @@ def _run_vector_import(layer_id: int, src_path: str, staging: str, created_by: i
                 ).scalar() or 0
         inserted = 0
         lo = 0
+        _set_import_phase(engine, layer_id, None)  # batch loop reports via import_count
         while lo <= max_fid and total > 0:
             hi = lo + INSERT_BATCH_SIZE
             with engine.begin() as conn:
@@ -648,9 +742,10 @@ def _run_vector_import(layer_id: int, src_path: str, staging: str, created_by: i
             lo = hi
         feature_count = inserted
 
+        # Bulk-build the spatial index in one pass (far faster than
+        # incremental maintenance during the load).
+        _set_import_phase(engine, layer_id, "स्पेसियल इन्डेक्स बनाइँदैछ...")
         with engine.begin() as conn:
-            # Bulk-build the spatial index in one pass (far faster than
-            # incremental maintenance during the load).
             conn.execute(
                 sql_text(
                     "CREATE INDEX IF NOT EXISTS idx_feature_geom "
@@ -671,7 +766,7 @@ def _run_vector_import(layer_id: int, src_path: str, staging: str, created_by: i
                 sql_text(
                     "UPDATE vector_layers SET geometry_type=:gt, fields_config=:fc, "
                     "metadata_info=:mi, import_status='complete', import_error=NULL, "
-                    "import_count=:n WHERE id=:lid"
+                    "import_phase=NULL, import_count=:n WHERE id=:lid"
                 ),
                 {
                     "gt": geom_type.value,
