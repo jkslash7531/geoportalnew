@@ -257,6 +257,16 @@ class FeatureUpdate(BaseModel):
     collector_lng: Optional[float] = Field(None, ge=-180.0, le=180.0)
 
 
+class FeatureSplitRequest(BaseModel):
+    """QGIS-style split: cut a line/polygon feature with a blade LineString."""
+    blade: Dict[str, Any]  # GeoJSON LineString geometry (WGS84)
+
+
+class FeatureMergeRequest(BaseModel):
+    """QGIS-style merge: union 2+ features of the same layer into the first one."""
+    feature_ids: List[int] = Field(..., min_length=2)
+
+
 class FeatureResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

@@ -69,6 +69,7 @@ docker-compose.override.yaml
 *.tiff
 *.geojson
 !tileserver/config.json
+!geoportal/public/wards.geojson
 
 # ---- Uploads & Generated Data ----
 uploads/

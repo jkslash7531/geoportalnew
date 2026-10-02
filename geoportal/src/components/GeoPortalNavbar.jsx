@@ -50,7 +50,7 @@ export default function GeoPortalNavbar({
             
             <div className="leading-tight min-w-0">
               <div className="text-[9px] sm:text-[11px] font-semibold text-gov-red-700 font-nepali truncate">
-                नेपाल सरकार • काठमाडौँ महानगरपालिका • नगर कार्यपालिकाको कार्यालय
+                काठमाडौँ महानगरपालिका • नगर कार्यपालिकाको कार्यालय
               </div>
               <div className="flex items-center gap-1.5">
                 <h1 className="text-sm sm:text-lg md:text-xl font-bold text-gov-blue-800 tracking-tight font-nepali truncate">

@@ -19,7 +19,7 @@ from app.database import get_db
 from app.models import (
     User, UserRole, VectorLayer, VectorFeature, AuditLog,
 )
-from app.schemas import FeatureCreate, FeatureUpdate, MessageResponse
+from app.schemas import FeatureCreate, FeatureUpdate, MessageResponse, FeatureSplitRequest, FeatureMergeRequest
 from app.auth import get_current_user, require_role, get_redis
 from app.cache import invalidate_layer_cache
 from app.helpers import log_audit, is_layer_accessible_by_user
@@ -671,6 +671,226 @@ async def delete_feature(
     await invalidate_layer_cache(target_layer_id)
 
     return MessageResponse(message="Feature deleted")
+
+
+@router.get("/layers/{layer_id}/extent")
+async def get_layer_extent(
+    layer_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Fast bounding box [west, south, east, north] (WGS84) of a layer via PostGIS ST_Extent.
+
+    Used by clients to zoom to very large layers without downloading every feature.
+    """
+    if not await is_layer_accessible_by_user(db, current_user, layer_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. This layer is not linked to any of your assigned projects.",
+        )
+    res = await db.execute(
+        select(
+            func.ST_XMin(func.ST_Extent(VectorFeature.geom)),
+            func.ST_YMin(func.ST_Extent(VectorFeature.geom)),
+            func.ST_XMax(func.ST_Extent(VectorFeature.geom)),
+            func.ST_YMax(func.ST_Extent(VectorFeature.geom)),
+        ).where(VectorFeature.layer_id == layer_id)
+    )
+    row = res.one_or_none()
+    if not row or any(v is None for v in row):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer has no features")
+    west, south, east, north = (float(v) for v in row)
+    return {"extent": [west, south, east, north]}
+
+
+@router.post("/features/{feature_id}/split")
+async def split_feature(
+    feature_id: int,
+    body: FeatureSplitRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.GisAdmin, UserRole.DataCollector, UserRole.Validator)),
+):
+    """QGIS-style split: cut a line/polygon feature with a blade LineString.
+
+    Uses PostGIS ST_Split. The original feature keeps the first part; new
+    features (copying the original properties) are created for the rest.
+    """
+    result = await db.execute(select(VectorFeature).where(VectorFeature.id == feature_id))
+    feature = result.scalar_one_or_none()
+    if not feature:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Feature not found")
+
+    if not await is_layer_accessible_by_user(db, current_user, feature.layer_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. This feature belongs to a layer outside your assigned projects.",
+        )
+
+    layer_result = await db.execute(select(VectorLayer).where(VectorLayer.id == feature.layer_id))
+    layer = layer_result.scalar_one_or_none()
+    if current_user.role == UserRole.DataCollector and layer and not layer.editable_by_collectors:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Layer not editable by DataCollectors")
+
+    blade = body.blade or {}
+    if blade.get("type") != "LineString" or not blade.get("coordinates"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A valid GeoJSON LineString 'blade' geometry is required to split.",
+        )
+
+    blade_json = json.dumps(blade)
+    split_res = await db.execute(
+        text(
+            "SELECT ST_AsGeoJSON((ST_Dump(ST_Split(geom, "
+            "ST_SetSRID(ST_GeomFromGeoJSON(:blade), 4326)))).geom) AS part "
+            "FROM vector_features WHERE id = :fid"
+        ),
+        {"blade": blade_json, "fid": feature_id},
+    )
+    parts = []
+    for row in split_res.all():
+        if row[0]:
+            try:
+                parts.append(json.loads(row[0]))
+            except Exception:
+                continue
+
+    if len(parts) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The split line does not cut the feature. Draw a line that crosses the feature completely.",
+        )
+
+    if current_user.role == UserRole.DataCollector:
+        for part in parts:
+            await verify_collector_grid_containment(
+                db, current_user, feature.layer_id, part, feature_id=feature_id
+            )
+
+    # Original feature keeps the first part
+    feature.geom = func.ST_SetSRID(func.ST_Force2D(func.ST_GeomFromGeoJSON(json.dumps(parts[0]))), 4326)
+    feature.version = (feature.version or 1) + 1
+    feature.updated_by = current_user.id
+
+    new_ids = []
+    for part in parts[1:]:
+        new_feat = VectorFeature(
+            layer_id=feature.layer_id,
+            geom=func.ST_SetSRID(func.ST_Force2D(func.ST_GeomFromGeoJSON(json.dumps(part))), 4326),
+            properties=dict(feature.properties or {}),
+            created_by=current_user.id,
+            version=1,
+        )
+        db.add(new_feat)
+        await db.flush()
+        new_ids.append(new_feat.id)
+
+    await log_audit(db, current_user.id, "SPLIT_FEATURE", "VectorFeature", feature_id,
+                    details={
+                        "layer_id": feature.layer_id,
+                        "feature_id": feature_id,
+                        "new_feature_ids": new_ids,
+                        "part_count": len(parts),
+                    },
+                    ip=request.client.host if request.client else None)
+
+    await invalidate_layer_cache(feature.layer_id)
+
+    return {
+        "feature_id": feature_id,
+        "new_feature_ids": new_ids,
+        "part_count": len(parts),
+        "parts": parts,
+    }
+
+
+@router.post("/layers/{layer_id}/merge")
+async def merge_features(
+    layer_id: int,
+    body: FeatureMergeRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.GisAdmin, UserRole.DataCollector, UserRole.Validator)),
+):
+    """QGIS-style merge: union 2+ features of the same layer into the first one.
+
+    The first feature keeps its properties and receives the unioned geometry;
+    the remaining features are deleted.
+    """
+    if not await is_layer_accessible_by_user(db, current_user, layer_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. This layer is not linked to any of your assigned projects.",
+        )
+
+    layer_result = await db.execute(select(VectorLayer).where(VectorLayer.id == layer_id))
+    layer = layer_result.scalar_one_or_none()
+    if not layer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Layer not found")
+    if current_user.role == UserRole.DataCollector and not layer.editable_by_collectors:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Layer not editable by DataCollectors")
+
+    unique_ids = list(dict.fromkeys(body.feature_ids or []))
+    if len(unique_ids) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Select at least two features to merge.",
+        )
+
+    result = await db.execute(
+        select(VectorFeature).where(
+            VectorFeature.id.in_(unique_ids), VectorFeature.layer_id == layer_id
+        )
+    )
+    features = result.scalars().all()
+    if len(features) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not find at least two features of this layer to merge.",
+        )
+
+    union_res = await db.execute(
+        text(
+            "SELECT ST_AsGeoJSON(ST_Union(geom)) AS merged FROM vector_features "
+            "WHERE id = ANY(:ids) AND layer_id = :lid"
+        ),
+        {"ids": unique_ids, "lid": layer_id},
+    )
+    merged_raw = union_res.scalar()
+    if not merged_raw:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not merge the selected features.")
+    merged_geom = json.loads(merged_raw)
+
+    if current_user.role == UserRole.DataCollector:
+        await verify_collector_grid_containment(db, current_user, layer_id, merged_geom)
+
+    keep = next((f for f in features if f.id == unique_ids[0]), features[0])
+    drop_ids = [f.id for f in features if f.id != keep.id]
+
+    keep.geom = func.ST_SetSRID(func.ST_Force2D(func.ST_GeomFromGeoJSON(json.dumps(merged_geom))), 4326)
+    keep.version = (keep.version or 1) + 1
+    keep.updated_by = current_user.id
+
+    for f in features:
+        if f.id != keep.id:
+            await db.delete(f)
+
+    await log_audit(db, current_user.id, "MERGE_FEATURES", "VectorFeature", keep.id,
+                    details={
+                        "layer_id": layer_id,
+                        "kept_feature_id": keep.id,
+                        "merged_feature_ids": drop_ids,
+                    },
+                    ip=request.client.host if request.client else None)
+
+    await invalidate_layer_cache(layer_id)
+
+    return {
+        "feature_id": keep.id,
+        "merged_feature_ids": drop_ids,
+        "geometry": merged_geom,
+    }
 
 
 @router.get("/layers/{layer_id}/audit-edits")

@@ -6,7 +6,7 @@ import {
   Grid3X3, Settings, Layers, PenTool, Circle, Square, Triangle,
   Minus, MapPin, Pencil, Plus, Edit3, Magnet, Sparkles, MousePointerClick,
   Crosshair, Check, CheckCircle2, Move, Undo2, Redo2, RotateCcw, ChevronDown, ChevronUp, X, AlertTriangle,
-  Trash2, Link2
+  Trash2, Link2, Scissors, Combine
 } from 'lucide-react';
 import { useAuth } from '../../lib/auth';
 import {
@@ -135,6 +135,17 @@ function DashboardContent() {
   const [drawToolsCollapsed, setDrawToolsCollapsed] = useState(false);
   const [toolsCollapsed, setToolsCollapsed] = useState(false);
   const [editSubMode, setEditSubMode] = useState(null); // null (none selected = all allowed) | 'tane' | 'bistar' | 'metne'
+
+  // ---- QGIS-style Split & Merge tool state ----
+  const [splitBladeMode, setSplitBladeMode] = useState(false); // draw blade to split selected feature
+  const [mergeSelectMode, setMergeSelectMode] = useState(false); // click features to pick merge set
+  const [mergeSelection, setMergeSelection] = useState([]); // [featureId, ...]
+  const [splitMerging, setSplitMerging] = useState(false); // API busy flag
+
+  // ---- Large-layer viewport (bbox) loading ----
+  // Layers with more features than this load per-viewport instead of all-at-once.
+  const BBOX_FEATURE_THRESHOLD = 3000;
+  const [bboxReloadTrigger, setBboxReloadTrigger] = useState(null); // { layerId, timestamp }
 
   // ---- Post-Save Edit Confirmation Modal State ----
   const [showPostSaveModal, setShowPostSaveModal] = useState(false);
@@ -294,6 +305,7 @@ function DashboardContent() {
             visible: existing?.visible || false,
             opacity: existing?.opacity ?? 100,
             features: existing?.features || null,
+            bboxMode: existing?.bboxMode || false,
             viewEdits: existing?.viewEdits ?? false,
             editCollectorId: existing?.editCollectorId ?? 'all',
             selectedCollectors: existing?.selectedCollectors ?? (isAdmin ? ['all'] : ['my_edits']),
@@ -441,7 +453,13 @@ function DashboardContent() {
       prev.map((v) => {
         if (v.id === id) {
           const nextVis = !v.visible;
-          if (nextVis && !v.features) {
+          const isLargeLayer = (v.feature_count ?? 0) > BBOX_FEATURE_THRESHOLD;
+          if (nextVis && !v.features && !v.bboxMode) {
+            if (isLargeLayer) {
+              // LARGE LAYER: viewport (bbox) loading — the map fetches only the
+              // visible extent per pan/zoom. No full download.
+              return { ...v, visible: nextVis, bboxMode: true };
+            }
             // Mark as loading, then fetch features
             featuresAPI.list(id)
               .then((res) => {
@@ -487,6 +505,27 @@ function DashboardContent() {
   const handleZoomToVector = useCallback(async (layer) => {
     if (!layer.visible) {
       handleVectorToggle(layer.id);
+    }
+    const useBbox = layer.bboxMode || (layer.feature_count ?? 0) > BBOX_FEATURE_THRESHOLD;
+    if (useBbox) {
+      // Large layer: zoom via cheap server-side extent — never downloads all features
+      try {
+        const res = await featuresAPI.getExtent(layer.id);
+        const [w, s, e, n] = res.data?.extent || [];
+        if ([w, s, e, n].every((v) => typeof v === 'number' && isFinite(v))) {
+          const toMerc = ([lon, lat]) => {
+            const x = (lon * 20037508.34) / 180;
+            const y = (Math.log(Math.tan(((90 + lat) * Math.PI) / 360)) / (Math.PI / 180) * 20037508.34) / 180;
+            return [x, y];
+          };
+          const [minX, minY] = toMerc([w, s]);
+          const [maxX, maxY] = toMerc([e, n]);
+          setZoomTarget({ type: 'extent', bounds: [minX, minY, maxX, maxY], timestamp: Date.now() });
+          return;
+        }
+      } catch (err) {
+        console.error('Failed to fetch layer extent:', err);
+      }
     }
     if (!layer.features) {
       try {
@@ -960,9 +999,15 @@ function DashboardContent() {
       setDrawMode(null);
 
       // Refresh authoritative layer GeoJSON in background without blocking UI
+      // (bbox-mode large layers just refresh their viewport source instead)
       const linkedLayerId = selectedLinkedFeature?.layerId;
+      const createdLayerIsBbox = serverVectors.find((v) => String(v.id) === String(activeLayerId))?.bboxMode;
+      if (createdLayerIsBbox) {
+        setBboxReloadTrigger({ layerId: activeLayerId, timestamp: Date.now() });
+      }
       (async () => {
         try {
+          if (createdLayerIsBbox) return;
           const res = await featuresAPI.list(activeLayerId);
           let featureData = res.data;
           if (Array.isArray(featureData)) {
@@ -997,7 +1042,7 @@ function DashboardContent() {
     } finally {
       setFormSaving(false);
     }
-  }, [editingGeometry, activeLayerId, gpsPosition, selectedLinkedFeature, isCollector, user]);
+  }, [editingGeometry, activeLayerId, gpsPosition, selectedLinkedFeature, isCollector, user, serverVectors]);
 
   // ---- Spatial Grid Boundary & Geofence Alert State ----
   const [gridAlert, setGridAlert] = useState(null);
@@ -1681,7 +1726,11 @@ function DashboardContent() {
     setFeatureDeleting(true);
     try {
       await featuresAPI.delete(featureId);
-      // Remove from serverVectors
+      // Remove from serverVectors (bbox-mode layers refresh their viewport source)
+      const deletedLayerIsBbox = serverVectors.find((v) => !layerId || String(v.id) === String(layerId))?.bboxMode;
+      if (deletedLayerIsBbox) {
+        setBboxReloadTrigger({ layerId: layerId || editLayerId, timestamp: Date.now() });
+      }
       setServerVectors((prev) =>
         prev.map((v) => {
           const matches = !layerId || String(v.id) === String(layerId);
@@ -1709,7 +1758,91 @@ function DashboardContent() {
     } finally {
       setFeatureDeleting(false);
     }
+  }, [serverVectors, editLayerId]);
+
+  // ---- Reload a vector layer's features (bbox layers refresh their viewport source) ----
+  const reloadVectorLayerFeatures = useCallback(async (layerId) => {
+    if (!layerId) return;
+    const layer = serverVectors.find((v) => String(v.id) === String(layerId));
+    if (layer?.bboxMode) {
+      setBboxReloadTrigger({ layerId, timestamp: Date.now() });
+      return;
+    }
+    try {
+      const res = await featuresAPI.list(layerId);
+      setServerVectors((prev) =>
+        prev.map((v) => (String(v.id) === String(layerId) ? { ...v, features: res.data } : v))
+      );
+    } catch (err) {
+      console.error('Failed to reload layer features:', err);
+    }
+  }, [serverVectors]);
+
+  // ---- Viewport (bbox) feature loader for large layers ----
+  const handleBboxLoadFeatures = useCallback(async (layerId, bboxStr) => {
+    const res = await featuresAPI.list(layerId, bboxStr);
+    return res.data;
   }, []);
+
+  // ---- QGIS-style SPLIT: blade drawn across the selected feature ----
+  const handleSplitBladeDrawn = useCallback(async (blade) => {
+    setSplitBladeMode(false);
+    if (!selectedFeature?.id) return;
+    setSplitMerging(true);
+    try {
+      const res = await featuresAPI.split(selectedFeature.id, blade);
+      const partCount = res.data?.part_count || 2;
+      const newIds = res.data?.new_feature_ids || [];
+      await reloadVectorLayerFeatures(editLayerId);
+      setSelectedFeature(null);
+      setEditSubMode(null);
+      alert(`फिचर काटियो — ${partCount} वटा भाग बने${newIds.length ? ` (नयाँ: #${newIds.join(', #')})` : ''}।\nFeature split into ${partCount} parts.`);
+    } catch (err) {
+      console.error('Split failed:', err);
+      alert(err.response?.data?.detail || 'फिचर काट्न सकिएन (Split failed)');
+    } finally {
+      setSplitMerging(false);
+    }
+  }, [selectedFeature, editLayerId, reloadVectorLayerFeatures]);
+
+  // ---- QGIS-style MERGE: toggle picked features ----
+  const handleMergeToggleFeature = useCallback(({ id }) => {
+    setMergeSelection((prev) => {
+      const s = String(id);
+      return prev.map(String).includes(s)
+        ? prev.filter((x) => String(x) !== s)
+        : [...prev, id];
+    });
+  }, []);
+
+  const handleMergeConfirm = useCallback(async () => {
+    if (mergeSelection.length < 2 || !editLayerId) return;
+    setSplitMerging(true);
+    try {
+      const res = await featuresAPI.merge(editLayerId, mergeSelection);
+      const keptId = res.data?.feature_id;
+      setMergeSelection([]);
+      setMergeSelectMode(false);
+      setSelectedFeature(null);
+      await reloadVectorLayerFeatures(editLayerId);
+      alert(`जोडियो! ${mergeSelection.length} वटा फिचर मर्ज भए (#${keptId} मा)।\nMerged ${mergeSelection.length} features into #${keptId}.`);
+    } catch (err) {
+      console.error('Merge failed:', err);
+      alert(err.response?.data?.detail || 'फिचर जोड्न सकिएन (Merge failed)');
+    } finally {
+      setSplitMerging(false);
+    }
+  }, [mergeSelection, editLayerId, reloadVectorLayerFeatures]);
+
+  // Clear split/merge modes when edit mode or the edit layer changes
+  useEffect(() => {
+    if (!editMode) {
+      setSplitBladeMode(false);
+      setMergeSelectMode(false);
+      setMergeSelection([]);
+      setEditSubMode(null);
+    }
+  }, [editMode, editLayerId]);
 
   if (authLoading || !isAuthenticated) {
     return (
@@ -1793,6 +1926,13 @@ function DashboardContent() {
           isCollector={isCollector}
           onFeatureBlocked={handleFeatureBlocked}
           editSubMode={editSubMode}
+          splitBladeMode={splitBladeMode}
+          onSplitBladeDrawn={handleSplitBladeDrawn}
+          mergeSelectMode={mergeSelectMode}
+          mergeSelection={mergeSelection}
+          onMergeToggleFeature={handleMergeToggleFeature}
+          onBboxLoadFeatures={handleBboxLoadFeatures}
+          bboxReloadTrigger={bboxReloadTrigger}
           outlinedTaskIds={outlinedTaskIds}
           outlineAllTasks={outlineAllTasks}
           pickLinkedFeatureMode={pickFeatureMode}
@@ -2753,6 +2893,116 @@ function DashboardContent() {
                           <span>मेट्ने</span>
                         </button>
                       </div>
+
+                      {/* QGIS-style Split & Merge tools */}
+                      <div className="grid grid-cols-2 gap-1 pt-0.5">
+                        {/* काट्ने (Split) */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (splitBladeMode) {
+                              setSplitBladeMode(false);
+                            } else {
+                              setMergeSelectMode(false);
+                              setEditSubMode(null);
+                              setSplitBladeMode(true);
+                            }
+                          }}
+                          disabled={
+                            splitMerging ||
+                            !selectedFeature ||
+                            !['LineString', 'MultiLineString', 'Polygon', 'MultiPolygon'].includes(
+                              selectedFeature.geometryType
+                            )
+                          }
+                          className={`py-1 px-1 rounded text-[9.5px] font-bold font-nepali flex items-center justify-center gap-0.5 border ${
+                            splitBladeMode
+                              ? 'bg-red-700 text-white border-red-800 shadow-xs ring-1 ring-red-400 cursor-pointer'
+                              : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50 cursor-pointer'
+                          } disabled:bg-slate-100 disabled:text-slate-400 disabled:border-slate-200 disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none`}
+                          title={
+                            !selectedFeature
+                              ? 'पहिले फिचर छान्नुहोस्'
+                              : 'काट्ने (Split): फिचरमाथि रेखा कोरेर दुई भागमा काट्नुहोस्'
+                          }
+                        >
+                          <Scissors className="w-2.5 h-2.5" />
+                          <span>काट्ने</span>
+                        </button>
+
+                        {/* जोड्ने (Merge) */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (mergeSelectMode) {
+                              setMergeSelectMode(false);
+                              setMergeSelection([]);
+                            } else {
+                              setSplitBladeMode(false);
+                              setEditSubMode(null);
+                              setMergeSelectMode(true);
+                            }
+                          }}
+                          disabled={splitMerging}
+                          className={`py-1 px-1 rounded text-[9.5px] font-bold font-nepali flex items-center justify-center gap-0.5 border ${
+                            mergeSelectMode
+                              ? 'bg-violet-700 text-white border-violet-800 shadow-xs ring-1 ring-violet-400 cursor-pointer'
+                              : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50 cursor-pointer'
+                          } disabled:bg-slate-100 disabled:text-slate-400 disabled:border-slate-200 disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none`}
+                          title="जोड्ने (Merge): दुई वा बढी फिचर छानेर एउटैमा जोड्नुहोस्"
+                        >
+                          <Combine className="w-2.5 h-2.5" />
+                          <span>जोड्ने</span>
+                        </button>
+                      </div>
+
+                      {/* Split active hint */}
+                      {splitBladeMode && (
+                        <div className="rounded bg-red-50 border border-red-200 px-2 py-1 text-[9px] font-nepali text-red-900 flex items-center justify-between gap-1">
+                          <span className="flex items-center gap-1">
+                            <Scissors className="w-3 h-3 shrink-0" />
+                            <span>फिचरमाथि काट्ने रेखा कोर्नुहोस्…</span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setSplitBladeMode(false)}
+                            className="underline font-bold shrink-0"
+                          >
+                            रद्द
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Merge active panel */}
+                      {mergeSelectMode && (
+                        <div className="rounded bg-violet-50 border border-violet-200 px-2 py-1.5 text-[9px] font-nepali text-violet-950 flex flex-col gap-1.5">
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="flex items-center gap-1 font-bold">
+                              <Combine className="w-3 h-3 shrink-0" />
+                              <span>छानिएका: {mergeSelection.length} फिचर</span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setMergeSelectMode(false);
+                                setMergeSelection([]);
+                              }}
+                              className="underline font-bold shrink-0"
+                            >
+                              रद्द
+                            </button>
+                          </div>
+                          <span className="text-violet-800">नक्सामा फिचरहरू क्लिक गरेर छान्नुहोस् (फेरि क्लिक = हटाउने)।</span>
+                          <button
+                            type="button"
+                            onClick={handleMergeConfirm}
+                            disabled={mergeSelection.length < 2 || splitMerging}
+                            className="py-1 rounded bg-violet-700 hover:bg-violet-800 disabled:bg-slate-300 text-white text-[10px] font-bold font-nepali transition-colors disabled:cursor-not-allowed"
+                          >
+                            {splitMerging ? 'जोड्दैछ…' : `${mergeSelection.length} वटा जोड्ने (Merge)`}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
 
