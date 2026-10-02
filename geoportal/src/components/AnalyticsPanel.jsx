@@ -88,9 +88,9 @@ export default function AnalyticsPanel({
     );
   }
 
-  // Expanded Mode: Full Infographics Panel
+  // Expanded Mode: Full Infographics Panel (bottom sheet on phones, floating card on desktop)
   return (
-    <div className="bg-white/95 backdrop-blur-md border border-slate-200 shadow-xl rounded-xl transition-all duration-300 flex flex-col z-30 max-h-[calc(100vh-140px)] w-84 sm:w-96">
+    <div className="bg-white/95 backdrop-blur-md border border-slate-200 shadow-xl rounded-xl transition-all duration-300 flex flex-col z-30 w-[calc(100vw-2rem)] sm:w-96 max-h-[62dvh] sm:max-h-[calc(100vh-140px)]">
       {/* Header */}
       <div className="p-3 bg-gov-blue-800 text-white flex items-center justify-between border-b border-gov-blue-900 rounded-t-xl select-none shadow-sm">
         <div className="flex items-center gap-2 min-w-0 flex-1 mr-2">

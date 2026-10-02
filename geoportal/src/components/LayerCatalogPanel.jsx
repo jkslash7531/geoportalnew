@@ -34,8 +34,8 @@ export default function LayerCatalogPanel({
 }) {
   const [searchTerm, setSearchTerm] = useState('');
   const [showBasemaps, setShowBasemaps] = useState(false);
-  const [showRasters, setShowRasters] = useState(true);
-  const [showVectors, setShowVectors] = useState(true);
+  const [showRasters, setShowRasters] = useState(false);
+  const [showVectors, setShowVectors] = useState(false);
 
   const basemaps = [
     { id: 'osm', label: 'OSM खुला सडक', icon: Map, color: 'text-gov-blue-800' },

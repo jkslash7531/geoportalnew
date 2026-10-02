@@ -45,7 +45,7 @@ export default function GeoPortalMap({
   // Municipal ward boundaries (always-on layer)
   const [wardOutlineOnly, setWardOutlineOnly] = useState(false);
   const [wardVisible, setWardVisible] = useState(true);
-  const [wardCollapsed, setWardCollapsed] = useState(false);
+  const [wardCollapsed, setWardCollapsed] = useState(true);
   const [wardList, setWardList] = useState([]); // [ward_no, ...] sorted
   const [hoveredWard, setHoveredWard] = useState(null);
   const [wardZoomSel, setWardZoomSel] = useState('');
@@ -614,24 +614,53 @@ export default function GeoPortalMap({
     }
 
     setLocating(true);
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setLocating(false);
-        const { longitude, latitude } = pos.coords;
-        const { fromLonLat } = olModules;
-        const view = mapInstance.current.getView();
+    const { fromLonLat } = olModules;
+    const view = mapInstance.current.getView();
+    const zoomTo = (longitude, latitude, zoom) => {
+      try {
         view.animate({
           center: fromLonLat([longitude, latitude]),
-          zoom: 17,
+          zoom,
           duration: 600,
         });
+      } catch (e) {}
+    };
+    // Phase 2 (refine): after the instant low-accuracy zoom, quietly refine
+    // with a high-accuracy fix so the final position is precise.
+    const refineWithHighAccuracy = () => {
+      try {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            setLocating(false);
+            zoomTo(pos.coords.longitude, pos.coords.latitude, 17);
+          },
+          () => { setLocating(false); },
+          { enableHighAccuracy: true, timeout: 9000, maximumAge: 30000 }
+        );
+      } catch (e) { setLocating(false); }
+    };
+    // Phase 1 (instant): low-accuracy / cached fix zooms immediately so the
+    // user never stares at a spinner waiting for a cold GPS lock.
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        zoomTo(pos.coords.longitude, pos.coords.latitude, 16);
+        refineWithHighAccuracy();
       },
       (err) => {
-        setLocating(false);
-        console.warn('Geolocation error:', err);
-        alert('जीपीएस स्थान पत्ता लगाउन सकिएन। कृपया ब्राउजरमा Location अनुमति दिनुहोस्। (Unable to retrieve your GPS location. Please check browser permissions.)');
+        // Low-accuracy failed — fall back to one high-accuracy attempt
+        console.warn('Geolocation quick fix failed, trying high accuracy:', err);
+        refineWithHighAccuracy();
+        setTimeout(() => {
+          // If refinement also failed, inform the user
+          setLocating((wasLocating) => {
+            if (wasLocating) {
+              alert('जीपीएस स्थान पत्ता लगाउन सकिएन। कृपया ब्राउजरमा Location अनुमति दिनुहोस्। (Unable to retrieve your GPS location. Please check browser permissions.)');
+            }
+            return false;
+          });
+        }, 9500);
       },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+      { enableHighAccuracy: false, timeout: 4000, maximumAge: 60000 }
     );
   };
 
@@ -700,8 +729,8 @@ export default function GeoPortalMap({
           />
         </button>
       </div>
-      {/* Municipal Ward Boundaries control — bottom right */}
-      <div className="absolute bottom-6 right-4 z-20 w-52 shadow-xl rounded-xl overflow-hidden bg-white/95 backdrop-blur-md border border-slate-200">
+      {/* Municipal Ward Boundaries control — bottom right (compact on phones so it never overlaps the infographics bar) */}
+      <div className="absolute bottom-4 sm:bottom-6 right-4 z-20 w-44 sm:w-52 shadow-xl rounded-xl overflow-hidden bg-white/95 backdrop-blur-md border border-slate-200">
         <div className="flex items-center justify-between px-3 py-2 bg-gov-blue-900 text-white">
           <span className="flex items-center gap-1.5 text-[11px] font-bold font-nepali">
             <MapPin className="w-3.5 h-3.5 text-gov-gold-400" />
