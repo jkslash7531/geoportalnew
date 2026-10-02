@@ -1,4 +1,4 @@
-name: kmc-gis-server
+name: kmc_gis_server
 
 services:
   # ============================================================
@@ -110,7 +110,9 @@ services:
       interval: 15s
       timeout: 10s
       retries: 5
-      start_period: 30s
+      # Fresh machines can spend minutes on initdb + PostGIS before the backend
+      # finishes its DB wait; don't mark the container unhealthy meanwhile.
+      start_period: 120s
 
   # ============================================================
   # Next.js Frontend — UI / Map Client
